@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pickle
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +14,8 @@ import mlflow
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from mlflow import MlflowClient
+from mlflow.entities import Metric
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     accuracy_score,
@@ -32,12 +36,33 @@ from weather_ml.openmeteo_features import (
     WEATHER_CONDITION_LABELS,
 )
 
-
 load_dotenv(dotenv_path=Path(".env"))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TARGET = "target_weather_condition_24h"
+MLFLOW_METRIC_BATCH_SIZE = 500
+SUMMARY_METRIC_NAMES = [
+    "accuracy",
+    "balanced_accuracy",
+    "precision_weighted",
+    "recall_macro",
+    "recall_weighted",
+    "f1_macro",
+    "f1_weighted",
+    "roc_auc_ovr_weighted",
+    "log_loss",
+]
+HISTORY_METRIC_NAMES = [
+    "accuracy",
+    "precision_weighted",
+    "recall_weighted",
+    "f1_weighted",
+    "roc_auc_ovr_weighted",
+    "log_loss",
+]
 
 DEFAULT_FEATURE_COLUMNS = [
     "temperature_2m",
@@ -152,7 +177,14 @@ def train_weather_condition_model(
         random_state=42,
         n_jobs=-1,
     )
+    logger.info(
+        "starting model training: rows_train=%s rows_test=%s n_estimators=%s",
+        len(train),
+        len(test),
+        params.n_estimators,
+    )
     model.fit(x_train, y_train)
+    logger.info("completed model training")
 
     predicted_labels = model.predict(x_test)
     predicted_conditions = label_encoder.inverse_transform(predicted_labels)
@@ -181,6 +213,7 @@ def train_weather_condition_model(
     metrics_history_plot_path = out / "metrics_history.png"
     roc_curve_path = out / "roc_auc_ovr.png"
 
+    logger.info("starting artifact generation: output_dir=%s", out)
     payload = {
         "model": model,
         "label_encoder": label_encoder,
@@ -220,14 +253,15 @@ def train_weather_condition_model(
         probabilities,
         label_encoder.classes_,
     )
+    logger.info("completed artifact generation: output_dir=%s", out)
 
     if log_to_mlflow:
+        logger.info("starting MLflow upload: experiment=%s", experiment_name)
         _log_mlflow_run(
             experiment_name=experiment_name,
             model=model,
             metrics=metrics,
             output_dir=out,
-            model_path=model_path,
             label_encoder=label_encoder,
             training_params=params,
             metrics_history=metrics_history,
@@ -450,7 +484,7 @@ def _write_metrics_history_plot(output_path: Path, history: pd.DataFrame) -> Non
         "log_loss",
     ]
     fig, axes = plt.subplots(3, 2, figsize=(13, 11), sharex=True)
-    for ax, metric_name in zip(axes.flatten(), metric_names):
+    for ax, metric_name in zip(axes.flatten(), metric_names, strict=True):
         for split_name, split_frame in history.groupby("split"):
             ax.plot(
                 split_frame["iteration"],
@@ -520,7 +554,6 @@ def _log_mlflow_run(
     model: XGBClassifier,
     metrics: dict[str, object],
     output_dir: Path,
-    model_path: Path,
     label_encoder: LabelEncoder,
     training_params: XGBoostTrainingParams,
     metrics_history: pd.DataFrame,
@@ -530,7 +563,7 @@ def _log_mlflow_run(
         mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    with mlflow.start_run(run_name="xgboost-weather-condition"):
+    with mlflow.start_run(run_name="xgboost-weather-condition") as run:
         mlflow.log_params(
             {
                 "model_type": "XGBClassifier",
@@ -552,38 +585,47 @@ def _log_mlflow_run(
                 "acceptance_threshold": str(metrics["acceptance_threshold"]),
             }
         )
-        for key in [
-            "accuracy",
-            "balanced_accuracy",
-            "precision_weighted",
-            "recall_macro",
-            "recall_weighted",
-            "f1_macro",
-            "f1_weighted",
-        ]:
-            mlflow.log_metric(key, float(metrics[key]))
-        if metrics["roc_auc_ovr_weighted"] is not None:
-            mlflow.log_metric("roc_auc_ovr_weighted", float(metrics["roc_auc_ovr_weighted"]))
-        if metrics["log_loss"] is not None:
-            mlflow.log_metric("log_loss", float(metrics["log_loss"]))
+        summary_metrics = {
+            key: float(metrics[key])
+            for key in SUMMARY_METRIC_NAMES
+            if metrics[key] is not None
+        }
+        mlflow.log_metrics(summary_metrics)
 
-        for row in metrics_history.to_dict(orient="records"):
-            step = int(row["iteration"])
-            split = str(row["split"])
-            for key in [
-                "accuracy",
-                "precision_weighted",
-                "recall_weighted",
-                "f1_weighted",
-                "roc_auc_ovr_weighted",
-                "log_loss",
-            ]:
-                value = row[key]
-                if value is not None:
-                    mlflow.log_metric(f"{split}_{key}", float(value), step=step)
-
-        mlflow.log_artifact(str(model_path))
+        history_metrics = _build_mlflow_history_metrics(metrics_history)
+        _log_mlflow_metric_batches(run.info.run_id, history_metrics)
         mlflow.log_artifacts(str(output_dir))
+    logger.info("completed MLflow upload: history_metrics=%s", len(history_metrics))
+
+
+def _build_mlflow_history_metrics(metrics_history: pd.DataFrame) -> list[Metric]:
+    timestamp = int(time.time() * 1000)
+    history_metrics: list[Metric] = []
+    for row in metrics_history.to_dict(orient="records"):
+        step = int(row["iteration"])
+        split = str(row["split"])
+        for key in HISTORY_METRIC_NAMES:
+            value = row[key]
+            if pd.isna(value):
+                continue
+            history_metrics.append(
+                Metric(
+                    key=f"{split}_{key}",
+                    value=float(value),
+                    timestamp=timestamp,
+                    step=step,
+                )
+            )
+    return history_metrics
+
+
+def _log_mlflow_metric_batches(run_id: str, metrics: list[Metric]) -> None:
+    client = MlflowClient()
+    for start in range(0, len(metrics), MLFLOW_METRIC_BATCH_SIZE):
+        client.log_batch(
+            run_id,
+            metrics=metrics[start : start + MLFLOW_METRIC_BATCH_SIZE],
+        )
 
 
 train_weather_code_model = train_weather_condition_model
