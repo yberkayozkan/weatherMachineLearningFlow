@@ -1,0 +1,62 @@
+name: OpenMeteo Supabase Pipeline
+
+on:
+  schedule:
+    - cron: "30 23 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: weather-ingestion
+  cancel-in-progress: false
+
+jobs:
+  openmeteo-to-supabase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      OPENMETEO_LAT: ${{ vars.OPENMETEO_LAT || '41.0138' }}
+      OPENMETEO_LON: ${{ vars.OPENMETEO_LON || '28.9497' }}
+      OPENMETEO_LOCATION_NAME: ${{ vars.OPENMETEO_LOCATION_NAME || 'Istanbul' }}
+      SUPABASE_RAW_TABLE: ${{ vars.SUPABASE_RAW_TABLE || 'KadikoyWeatherCodeRaw' }}
+      SUPABASE_FEATURE_TABLE: ${{ vars.SUPABASE_FEATURE_TABLE || 'KadikoyWeatherCodeFeature' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Compute daily Open-Meteo window
+        id: dates
+        shell: bash
+        run: |
+          end_date="$(TZ=Europe/Istanbul date +%F)"
+          start_date="$(TZ=Europe/Istanbul date -d "$end_date - 4 days" +%F)"
+          max_persist_observed_at="$(TZ=Europe/Istanbul date -d "$end_date - 1 day" "+%F 23:00:00")"
+          echo "start_date=$start_date" >> "$GITHUB_OUTPUT"
+          echo "end_date=$end_date" >> "$GITHUB_OUTPUT"
+          echo "max_persist_observed_at=$max_persist_observed_at" >> "$GITHUB_OUTPUT"
+          echo "Downloading weather context from $start_date to $end_date"
+          echo "Persisting Supabase rows up to $max_persist_observed_at"
+
+      - name: Download today's window, feature engineer, and push to Supabase
+        run: >
+          python -m weather_ml.pipelines.run_openmeteo_to_supabase
+          --start-date "${{ steps.dates.outputs.start_date }}"
+          --end-date "${{ steps.dates.outputs.end_date }}"
+          --max-persist-observed-at "${{ steps.dates.outputs.max_persist_observed_at }}"
+          --raw-table "$SUPABASE_RAW_TABLE"
+          --feature-table "$SUPABASE_FEATURE_TABLE"

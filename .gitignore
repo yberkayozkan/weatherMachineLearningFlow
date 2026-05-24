@@ -1,0 +1,49 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+.agents/
+
+# Python cache and build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Local data and generated pipeline outputs
+data/
+cache/
+exports/
+artifacts/
+models/
+mlruns/
+.cache/
+
+# Model and dataset artifacts
+*.pkl
+*.joblib
+*.parquet
+*.feather
+*.sqlite
+*.db
+*.csv
+!tests/fixtures/*.csv
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
