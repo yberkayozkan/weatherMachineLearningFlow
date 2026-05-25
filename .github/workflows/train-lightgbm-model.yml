@@ -1,0 +1,117 @@
+name: Train LightGBM Weather Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_estimators:
+        description: "LightGBM tree count"
+        required: false
+        default: "500"
+      learning_rate:
+        description: "LightGBM learning rate"
+        required: false
+        default: "0.05"
+      max_depth:
+        description: "LightGBM max tree depth"
+        required: false
+        default: "5"
+      num_leaves:
+        description: "LightGBM maximum leaves"
+        required: false
+        default: "31"
+      subsample:
+        description: "LightGBM row subsample ratio"
+        required: false
+        default: "0.9"
+      colsample_bytree:
+        description: "LightGBM column subsample ratio"
+        required: false
+        default: "0.9"
+      reg_lambda:
+        description: "LightGBM L2 regularization"
+        required: false
+        default: "1.0"
+      test_fraction:
+        description: "Chronological test fraction"
+        required: false
+        default: "0.2"
+      max_rows:
+        description: "Optional row limit; blank means full table"
+        required: false
+        default: ""
+      acceptance_threshold:
+        description: "Minimum f1_weighted for accepted tag"
+        required: false
+        default: "0.40"
+  workflow_run:
+    workflows: ["OpenMeteo Supabase Pipeline"]
+    types: [completed]
+
+concurrency:
+  group: weather-lightgbm-training
+  cancel-in-progress: false
+
+jobs:
+  train:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_FEATURE_TABLE: ${{ vars.SUPABASE_FEATURE_TABLE || 'KadikoyWeatherCodeFeature' }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+      MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+      TRAIN_N_ESTIMATORS: ${{ github.event.inputs.n_estimators || '500' }}
+      TRAIN_LEARNING_RATE: ${{ github.event.inputs.learning_rate || '0.05' }}
+      TRAIN_MAX_DEPTH: ${{ github.event.inputs.max_depth || '5' }}
+      TRAIN_NUM_LEAVES: ${{ github.event.inputs.num_leaves || '31' }}
+      TRAIN_SUBSAMPLE: ${{ github.event.inputs.subsample || '0.9' }}
+      TRAIN_COLSAMPLE_BYTREE: ${{ github.event.inputs.colsample_bytree || '0.9' }}
+      TRAIN_REG_LAMBDA: ${{ github.event.inputs.reg_lambda || '1.0' }}
+      TRAIN_TEST_FRACTION: ${{ github.event.inputs.test_fraction || '0.2' }}
+      TRAIN_MAX_ROWS: ${{ github.event.inputs.max_rows || '' }}
+      TRAIN_ACCEPTANCE_THRESHOLD: ${{ github.event.inputs.acceptance_threshold || '0.40' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Train LightGBM model from Supabase
+        shell: bash
+        run: |
+          args=(
+            --table-name "$SUPABASE_FEATURE_TABLE"
+            --output-dir artifacts/lightgbm-training
+            --n-estimators "$TRAIN_N_ESTIMATORS"
+            --learning-rate "$TRAIN_LEARNING_RATE"
+            --max-depth "$TRAIN_MAX_DEPTH"
+            --num-leaves "$TRAIN_NUM_LEAVES"
+            --subsample "$TRAIN_SUBSAMPLE"
+            --colsample-bytree "$TRAIN_COLSAMPLE_BYTREE"
+            --reg-lambda "$TRAIN_REG_LAMBDA"
+            --test-fraction "$TRAIN_TEST_FRACTION"
+            --acceptance-threshold "$TRAIN_ACCEPTANCE_THRESHOLD"
+          )
+          if [ -n "$TRAIN_MAX_ROWS" ]; then
+            args+=(--max-rows "$TRAIN_MAX_ROWS")
+          fi
+          python -m weather_ml.pipelines.train_lightgbm_from_supabase "${args[@]}"
+
+      - name: Upload LightGBM training artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-lightgbm-training-artifacts
+          path: artifacts/lightgbm-training

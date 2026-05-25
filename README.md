@@ -1,18 +1,26 @@
 # Weather Machine Learning
 
-Open-Meteo hourly archive ingestion, Supabase loading, and XGBoost weather-condition training.
+An hourly weather data pipeline that retrieves Open-Meteo archive observations,
+engineers time-based features, persists raw and feature-ready records in
+Supabase, and trains XGBoost or LightGBM classifiers to predict the weather
+condition 24 hours ahead.
 
 ## Pipeline
 
-1. Download Open-Meteo hourly archive data.
-2. Build lag, rolling, calendar, and weather-condition features.
-3. Write only target-safe rows to Supabase.
-4. Train an XGBoost classifier for `target_weather_condition_24h` using current and historical features.
-5. Log metrics and artifacts to DagsHub MLflow.
+1. Retrieve hourly archive observations from Open-Meteo.
+2. Map WMO weather codes into condition groups and build lag, rolling-window,
+   and calendar features.
+3. Upsert raw observations and target-safe feature rows into Supabase tables
+   keyed by `observed_at`.
+4. Train an `XGBClassifier` or `LGBMClassifier` for the multiclass
+   `target_weather_condition_24h` target using chronological train/test
+   splitting.
+5. Manually log model parameters, summary metrics, run tags, iteration-level
+   train/test metrics, and generated artifacts to MLflow.
 
-The model predicts one of these weather-condition groups 24 hours ahead. The only
-future label stored is `target_weather_condition_24h`; numeric future targets and
-future weather code targets are not stored.
+The only future label stored in the feature table is
+`target_weather_condition_24h`; numeric future targets and future weather-code
+targets are excluded.
 
 ```text
 clear
@@ -25,6 +33,18 @@ snow
 showers
 thunderstorm
 ```
+
+## Technologies
+
+- Python, pandas, and NumPy for data processing and feature generation.
+- Open-Meteo API client with request caching and retry support for archive retrieval.
+- Supabase with PostgreSQL/SQLAlchemy access paths for storage and upserts.
+- XGBoost, LightGBM, and scikit-learn for multiclass model training and evaluation.
+- Matplotlib for evaluation and feature-importance visual artifacts.
+- MLflow configured for DagsHub-compatible tracking of parameters, metrics,
+  tags, metric history, and artifacts.
+- GitHub Actions for ingestion and training workflows.
+- pytest and Ruff for verification and code-quality checks.
 
 ## Setup
 
@@ -47,8 +67,8 @@ SUPABASE_SERVICE_ROLE_KEY
 Required DagsHub MLflow values:
 
 ```text
-MLFLOW_TRACKING_URI=https://dagshub.com/dragnellstr/mlflowdeneme.mlflow
-MLFLOW_TRACKING_USERNAME=dragnellstr
+MLFLOW_TRACKING_URI=https://dagshub.com/<dagshub_username>/<dagshub_repo>.mlflow
+MLFLOW_TRACKING_USERNAME=<dagshub_username>
 MLFLOW_TRACKING_PASSWORD=<dagshub_token>
 ```
 
@@ -97,22 +117,59 @@ Train from a local feature CSV without MLflow:
 python -m weather_ml.pipelines.train_from_csv --csv-path path\to\features.csv --no-mlflow
 ```
 
-## GitHub Actions
+Train LightGBM from Supabase and log to its MLflow experiment:
 
-`.github/workflows/weather-ingestion.yml` runs the Open-Meteo to Supabase pipeline daily.
+```powershell
+python -m weather_ml.pipelines.train_lightgbm_from_supabase --table-name KadikoyWeatherCodeFeature
+```
 
-`.github/workflows/train-model.yml` runs after ingestion succeeds and uploads:
+Train LightGBM from a local feature CSV without MLflow:
+
+```powershell
+python -m weather_ml.pipelines.train_lightgbm_from_csv --csv-path path\to\features.csv --no-mlflow
+```
+
+## Training Outputs
+
+XGBoost writes to `artifacts/training` by default with model file
+`weather_condition_xgboost_model.pkl`. LightGBM writes to
+`artifacts/lightgbm-training` by default with model file
+`weather_condition_lightgbm_model.pkl`. Each training run also writes the
+following shared outputs; when MLflow logging is enabled, the output directory
+is uploaded to the run.
 
 ```text
-weather_condition_xgboost_model.pkl
 metrics.json
 metrics_history.csv
 test_predictions.csv
 confusion_matrix.png
-metrics_summary.png
+feature_importance.csv
+feature_importance.png
 metrics_history.png
-roc_auc_ovr.png
+roc_auc_ovr.png (when ROC curves can be calculated)
 ```
+
+`feature_importance.csv` and `feature_importance.png` report the trained
+model's `feature_importances_` values. XGBoost logs to the default experiment
+`weather-condition-xgboost`; LightGBM logs to `weather-condition-lightgbm`.
+MLflow metrics are logged explicitly by the training code; MLflow autologging
+is not enabled.
+
+## GitHub Actions
+
+`.github/workflows/weather-ingestion.yml` runs on a daily schedule and can be
+started manually. It downloads a recent Open-Meteo window, builds features,
+and writes raw and feature rows to Supabase.
+
+`.github/workflows/train-model.yml` can be started manually with XGBoost and
+split parameters, or runs after a successful ingestion workflow. It trains
+from the Supabase feature table, logs to MLflow, and uploads the training
+output directory as a GitHub Actions artifact.
+
+`.github/workflows/train-lightgbm-model.yml` can be started manually with
+LightGBM and split parameters, or runs after a successful ingestion workflow.
+It trains from the Supabase feature table, logs to the LightGBM MLflow
+experiment, and uploads `artifacts/lightgbm-training`.
 
 Add these GitHub secrets:
 

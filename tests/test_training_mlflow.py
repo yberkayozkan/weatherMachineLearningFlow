@@ -6,6 +6,23 @@ import pandas as pd
 from weather_ml import training
 
 
+def _training_frame(row_count: int = 40) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            column: np.linspace(0.0, 1.0, row_count)
+            for column in training.DEFAULT_FEATURE_COLUMNS
+        }
+    )
+    frame["observed_at"] = pd.date_range("2026-01-01", periods=row_count, freq="h")
+    frame[training.DEFAULT_TARGET] = [
+        ["clear", "rain", "cloudy"][index % 3] for index in range(row_count)
+    ]
+    frame["is_weekend"] = False
+    frame["weather_condition_lag_4h_code"] = 0
+    frame["weather_condition_lag_12h_code"] = 0
+    return frame
+
+
 def _metrics_history(row_count: int) -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -129,3 +146,30 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
     assert calls["history"][0][0] == "run-123"
     assert calls["single_artifacts"] == []
     assert calls["artifact_dirs"] == [str(tmp_path)]
+
+
+def test_training_excludes_legacy_summary_plot_and_preserves_diagnostic_artifacts(tmp_path) -> None:
+    legacy_summary = tmp_path / "metrics_summary.png"
+    legacy_summary.write_bytes(b"legacy")
+
+    artifacts = training.train_weather_condition_model(
+        _training_frame(),
+        output_dir=str(tmp_path),
+        log_to_mlflow=False,
+        training_params=training.XGBoostTrainingParams(n_estimators=2),
+    )
+
+    assert not hasattr(artifacts, "metrics_plot_path")
+    assert not legacy_summary.exists()
+    assert artifacts.confusion_matrix_path.exists()
+    assert artifacts.feature_importance_path.exists()
+    assert artifacts.feature_importance_plot_path.exists()
+    assert artifacts.metrics_history_path.exists()
+    assert artifacts.metrics_history_plot_path.exists()
+    assert artifacts.roc_curve_path is not None
+    assert artifacts.roc_curve_path.exists()
+
+    feature_importance = pd.read_csv(artifacts.feature_importance_path)
+    assert list(feature_importance.columns) == ["feature", "importance"]
+    assert set(feature_importance["feature"]) == set(training.DEFAULT_FEATURE_COLUMNS)
+    assert feature_importance["importance"].is_monotonic_decreasing

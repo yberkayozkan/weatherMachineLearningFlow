@@ -117,7 +117,8 @@ class TrainingArtifacts:
     metrics_path: Path
     predictions_path: Path
     confusion_matrix_path: Path
-    metrics_plot_path: Path
+    feature_importance_path: Path
+    feature_importance_plot_path: Path
     metrics_history_path: Path
     metrics_history_plot_path: Path
     roc_curve_path: Path | None
@@ -199,7 +200,17 @@ def train_weather_condition_model(
         train=train,
         test=test,
         target_column=target_column,
-        training_params=params,
+        acceptance_threshold=params.acceptance_threshold,
+        model_params_name="xgboost_params",
+        model_params={
+            "n_estimators": params.n_estimators,
+            "max_depth": params.max_depth,
+            "learning_rate": params.learning_rate,
+            "subsample": params.subsample,
+            "colsample_bytree": params.colsample_bytree,
+            "reg_lambda": params.reg_lambda,
+            "eval_metric": "mlogloss",
+        },
     )
 
     out = Path(output_dir)
@@ -209,9 +220,12 @@ def train_weather_condition_model(
     metrics_history_path = out / "metrics_history.csv"
     predictions_path = out / "test_predictions.csv"
     confusion_matrix_path = out / "confusion_matrix.png"
-    metrics_plot_path = out / "metrics_summary.png"
+    feature_importance_path = out / "feature_importance.csv"
+    feature_importance_plot_path = out / "feature_importance.png"
     metrics_history_plot_path = out / "metrics_history.png"
     roc_curve_path = out / "roc_auc_ovr.png"
+    legacy_metrics_plot_path = out / "metrics_summary.png"
+    legacy_metrics_plot_path.unlink(missing_ok=True)
 
     logger.info("starting artifact generation: output_dir=%s", out)
     payload = {
@@ -224,6 +238,7 @@ def train_weather_condition_model(
     with model_path.open("wb") as file:
         pickle.dump(payload, file)
 
+    feature_importance = _build_feature_importance(model)
     metrics_history = _build_metrics_history(
         model=model,
         x_train=x_train,
@@ -234,7 +249,9 @@ def train_weather_condition_model(
         total_iterations=params.n_estimators,
     )
     metrics["metrics_history_csv"] = str(metrics_history_path)
+    metrics["feature_importance_csv"] = str(feature_importance_path)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    feature_importance.to_csv(feature_importance_path, index=False)
     metrics_history.to_csv(metrics_history_path, index=False)
     pd.DataFrame(
         {
@@ -245,7 +262,7 @@ def train_weather_condition_model(
         }
     ).to_csv(predictions_path, index=False)
     _write_confusion_matrix(confusion_matrix_path, y_test, predicted_labels, label_encoder.classes_)
-    _write_metrics_plot(metrics_plot_path, metrics)
+    _write_feature_importance_plot(feature_importance_plot_path, feature_importance)
     _write_metrics_history_plot(metrics_history_plot_path, metrics_history)
     roc_curve_written = _write_roc_curve(
         roc_curve_path,
@@ -272,7 +289,8 @@ def train_weather_condition_model(
         metrics_path=metrics_path,
         predictions_path=predictions_path,
         confusion_matrix_path=confusion_matrix_path,
-        metrics_plot_path=metrics_plot_path,
+        feature_importance_path=feature_importance_path,
+        feature_importance_plot_path=feature_importance_plot_path,
         metrics_history_path=metrics_history_path,
         metrics_history_plot_path=metrics_history_plot_path,
         roc_curve_path=roc_curve_path if roc_curve_written else None,
@@ -281,9 +299,15 @@ def train_weather_condition_model(
 
 def _prepare_training_frame(frame: pd.DataFrame, *, target_column: str) -> pd.DataFrame:
     if frame.empty:
-        raise ValueError("Training dataframe is empty. Populate the Supabase feature table before training.")
+        raise ValueError(
+            "Training dataframe is empty. Populate the Supabase feature table before training."
+        )
 
-    missing = [column for column in [*DEFAULT_FEATURE_COLUMNS, target_column, "observed_at"] if column not in frame.columns]
+    missing = [
+        column
+        for column in [*DEFAULT_FEATURE_COLUMNS, target_column, "observed_at"]
+        if column not in frame.columns
+    ]
     if missing:
         raise ValueError(f"Missing training columns: {', '.join(missing)}")
 
@@ -307,14 +331,18 @@ def _build_metrics(
     train: pd.DataFrame,
     test: pd.DataFrame,
     target_column: str,
-    training_params: XGBoostTrainingParams,
+    acceptance_threshold: float,
+    model_params_name: str,
+    model_params: dict[str, object],
 ) -> dict[str, object]:
     classes = list(label_encoder.classes_)
     roc_auc = _safe_multiclass_roc_auc(y_test, probabilities, len(classes))
     f1_weighted = float(f1_score(y_test, predicted_labels, average="weighted", zero_division=0))
-    precision_weighted = float(precision_score(y_test, predicted_labels, average="weighted", zero_division=0))
+    precision_weighted = float(
+        precision_score(y_test, predicted_labels, average="weighted", zero_division=0)
+    )
     loss = _safe_log_loss(y_test, probabilities, len(classes))
-    accepted = f1_weighted >= training_params.acceptance_threshold
+    accepted = f1_weighted >= acceptance_threshold
     return {
         "rows_total": int(len(train) + len(test)),
         "rows_train": int(len(train)),
@@ -324,24 +352,20 @@ def _build_metrics(
         "accuracy": float(accuracy_score(y_test, predicted_labels)),
         "balanced_accuracy": float(balanced_accuracy_score(y_test, predicted_labels)),
         "precision_weighted": precision_weighted,
-        "recall_macro": float(recall_score(y_test, predicted_labels, average="macro", zero_division=0)),
-        "recall_weighted": float(recall_score(y_test, predicted_labels, average="weighted", zero_division=0)),
+        "recall_macro": float(
+            recall_score(y_test, predicted_labels, average="macro", zero_division=0)
+        ),
+        "recall_weighted": float(
+            recall_score(y_test, predicted_labels, average="weighted", zero_division=0)
+        ),
         "f1_macro": float(f1_score(y_test, predicted_labels, average="macro", zero_division=0)),
         "f1_weighted": f1_weighted,
         "roc_auc_ovr_weighted": roc_auc,
         "log_loss": loss,
         "accepted": accepted,
         "acceptance_metric": "f1_weighted",
-        "acceptance_threshold": training_params.acceptance_threshold,
-        "xgboost_params": {
-            "n_estimators": training_params.n_estimators,
-            "max_depth": training_params.max_depth,
-            "learning_rate": training_params.learning_rate,
-            "subsample": training_params.subsample,
-            "colsample_bytree": training_params.colsample_bytree,
-            "reg_lambda": training_params.reg_lambda,
-            "eval_metric": "mlogloss",
-        },
+        "acceptance_threshold": acceptance_threshold,
+        model_params_name: model_params,
         "classification_report": classification_report(
             y_test,
             predicted_labels,
@@ -352,7 +376,9 @@ def _build_metrics(
         ),
         "confusion_matrix": {
             "labels": classes,
-            "matrix": confusion_matrix(y_test, predicted_labels, labels=list(range(len(classes)))).tolist(),
+            "matrix": confusion_matrix(
+                y_test, predicted_labels, labels=list(range(len(classes)))
+            ).tolist(),
         },
         "train_start": str(train["observed_at"].iloc[0]),
         "train_end": str(train["observed_at"].iloc[-1]),
@@ -391,20 +417,43 @@ def _build_metrics_history(
                     "split": split_name,
                     "accuracy": float(accuracy_score(y_values, predicted_labels)),
                     "precision_weighted": float(
-                        precision_score(y_values, predicted_labels, average="weighted", zero_division=0)
+                        precision_score(
+                            y_values, predicted_labels, average="weighted", zero_division=0
+                        )
                     ),
                     "recall_weighted": float(
-                        recall_score(y_values, predicted_labels, average="weighted", zero_division=0)
+                        recall_score(
+                            y_values, predicted_labels, average="weighted", zero_division=0
+                        )
                     ),
-                    "f1_weighted": float(f1_score(y_values, predicted_labels, average="weighted", zero_division=0)),
-                    "roc_auc_ovr_weighted": _safe_multiclass_roc_auc(y_values, probabilities, len(classes)),
+                    "f1_weighted": float(
+                        f1_score(y_values, predicted_labels, average="weighted", zero_division=0)
+                    ),
+                    "roc_auc_ovr_weighted": _safe_multiclass_roc_auc(
+                        y_values, probabilities, len(classes)
+                    ),
                     "log_loss": _safe_log_loss(y_values, probabilities, len(classes)),
                 }
             )
     return pd.DataFrame(rows)
 
 
-def _safe_multiclass_roc_auc(y_test: np.ndarray, probabilities: np.ndarray, class_count: int) -> float | None:
+def _build_feature_importance(model: XGBClassifier) -> pd.DataFrame:
+    return (
+        pd.DataFrame(
+            {
+                "feature": DEFAULT_FEATURE_COLUMNS,
+                "importance": model.feature_importances_,
+            }
+        )
+        .sort_values("importance", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def _safe_multiclass_roc_auc(
+    y_test: np.ndarray, probabilities: np.ndarray, class_count: int
+) -> float | None:
     present_classes = sorted(set(y_test.tolist()))
     if len(present_classes) < 2:
         return None
@@ -445,30 +494,18 @@ def _write_confusion_matrix(
     plt.close(fig)
 
 
-def _write_metrics_plot(output_path: Path, metrics: dict[str, object]) -> None:
-    metric_names = [
-        "accuracy",
-        "precision_weighted",
-        "recall_macro",
-        "recall_weighted",
-        "f1_macro",
-        "f1_weighted",
-        "roc_auc_ovr_weighted",
-        "log_loss",
-    ]
-    values = [metrics[name] for name in metric_names]
-    labels = [name.replace("_", " ") for name in metric_names]
-    numeric_values = [0 if value is None else float(value) for value in values]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(labels, numeric_values, color="#2563eb")
-    ax.set_ylim(0, 1)
-    ax.set_ylabel("score")
-    ax.set_title("Weather condition model metrics")
-    ax.tick_params(axis="x", rotation=30)
-    for index, value in enumerate(values):
-        text = "n/a" if value is None else f"{float(value):.3f}"
-        ax.text(index, numeric_values[index] + 0.02, text, ha="center", fontsize=9)
+def _write_feature_importance_plot(
+    output_path: Path,
+    feature_importance: pd.DataFrame,
+    *,
+    model_name: str = "XGBoost",
+) -> None:
+    ordered = feature_importance.sort_values("importance", ascending=True)
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.barh(ordered["feature"], ordered["importance"], color="#2563eb")
+    ax.set_xlabel("importance")
+    ax.set_title(f"{model_name} feature importance")
+    ax.grid(axis="x", alpha=0.25)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)

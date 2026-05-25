@@ -21,6 +21,7 @@ dependencies = [
     "SQLAlchemy>=2.0.30",
     "supabase>=2.10.0",
     "xgboost>=2.1.0",
+    "lightgbm>=4.6.0",
 ]
 
 [project.optional-dependencies]
