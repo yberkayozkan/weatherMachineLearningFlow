@@ -32,9 +32,13 @@ on:
         required: false
         default: "1.0"
       test_fraction:
-        description: "Chronological test fraction"
+        description: "Latest-period final holdout fraction"
         required: false
         default: "0.2"
+      cv_splits:
+        description: "Expanding-window development validation split count"
+        required: false
+        default: "3"
       max_rows:
         description: "Optional row limit; blank means full table"
         required: false
@@ -71,6 +75,7 @@ jobs:
       TRAIN_COLSAMPLE_BYTREE: ${{ github.event.inputs.colsample_bytree || '0.9' }}
       TRAIN_REG_LAMBDA: ${{ github.event.inputs.reg_lambda || '1.0' }}
       TRAIN_TEST_FRACTION: ${{ github.event.inputs.test_fraction || '0.2' }}
+      TRAIN_CV_SPLITS: ${{ github.event.inputs.cv_splits || '3' }}
       TRAIN_MAX_ROWS: ${{ github.event.inputs.max_rows || '' }}
       TRAIN_ACCEPTANCE_THRESHOLD: ${{ github.event.inputs.acceptance_threshold || '0.40' }}
     steps:
@@ -103,6 +108,7 @@ jobs:
             --colsample-bytree "$TRAIN_COLSAMPLE_BYTREE"
             --reg-lambda "$TRAIN_REG_LAMBDA"
             --test-fraction "$TRAIN_TEST_FRACTION"
+            --cv-splits "$TRAIN_CV_SPLITS"
             --acceptance-threshold "$TRAIN_ACCEPTANCE_THRESHOLD"
           )
           if [ -n "$TRAIN_MAX_ROWS" ]; then

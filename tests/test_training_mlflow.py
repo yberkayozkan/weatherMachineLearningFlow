@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -6,12 +8,9 @@ import pandas as pd
 from weather_ml import training
 
 
-def _training_frame(row_count: int = 40) -> pd.DataFrame:
+def _training_frame(row_count: int = 240) -> pd.DataFrame:
     frame = pd.DataFrame(
-        {
-            column: np.linspace(0.0, 1.0, row_count)
-            for column in training.DEFAULT_FEATURE_COLUMNS
-        }
+        {column: np.linspace(0.0, 1.0, row_count) for column in training.DEFAULT_FEATURE_COLUMNS}
     )
     frame["observed_at"] = pd.date_range("2026-01-01", periods=row_count, freq="h")
     frame[training.DEFAULT_TARGET] = [
@@ -20,6 +19,15 @@ def _training_frame(row_count: int = 40) -> pd.DataFrame:
     frame["is_weekend"] = False
     frame["weather_condition_lag_4h_code"] = 0
     frame["weather_condition_lag_12h_code"] = 0
+    return frame
+
+
+def _historical_forecast_training_frame(row_count: int = 360) -> pd.DataFrame:
+    frame = _training_frame(row_count)
+    frame["observed_at"] = pd.date_range("2021-03-20", periods=row_count, freq="h")
+    frame["cape"] = np.linspace(0.0, 200.0, row_count)
+    frame["freezing_level_height"] = np.linspace(250.0, 2800.0, row_count)
+    frame["uv_index"] = np.linspace(0.0, 8.0, row_count)
     return frame
 
 
@@ -41,6 +49,30 @@ def _metrics_history(row_count: int) -> pd.DataFrame:
     )
 
 
+def _cv_metrics() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "fold": fold,
+                **{name: 0.4 + fold / 10 for name in training.SUMMARY_METRIC_NAMES},
+            }
+            for fold in range(1, 4)
+        ]
+    )
+
+
+def test_temporal_split_applies_exact_gap_to_cv_and_final_holdout() -> None:
+    data = training._prepare_training_frame(
+        _training_frame(), target_column=training.DEFAULT_TARGET
+    )
+    split = training._build_temporal_validation_split(data, test_fraction=0.2, cv_splits=3)
+
+    assert split.final_test.index[0] - split.final_train.index[-1] - 1 == 24
+    for train_indices, validation_indices in split.cv_indices:
+        assert validation_indices[0] - train_indices[-1] - 1 == 24
+        assert train_indices[-1] < validation_indices[0]
+
+
 def test_build_mlflow_history_metrics_preserves_names_steps_and_skips_missing_values() -> None:
     history = _metrics_history(2)
     history.loc[0, "roc_auc_ovr_weighted"] = np.nan
@@ -55,6 +87,12 @@ def test_build_mlflow_history_metrics_preserves_names_steps_and_skips_missing_va
     }
     assert not any(metric.key == "train_roc_auc_ovr_weighted" for metric in metrics)
     assert not any(metric.key == "test_log_loss" for metric in metrics)
+
+
+def test_balanced_sample_weight_increases_minority_class_weight() -> None:
+    weights = training._build_balanced_sample_weight(np.array([0, 0, 0, 1]))
+
+    assert weights[-1] > weights[0]
 
 
 def test_log_mlflow_metric_batches_splits_1200_metrics(monkeypatch) -> None:
@@ -76,6 +114,7 @@ def test_log_mlflow_metric_batches_splits_1200_metrics(monkeypatch) -> None:
 
 def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch, tmp_path) -> None:
     calls: dict[str, list[object]] = {
+        "params": [],
         "summary": [],
         "artifact_dirs": [],
         "single_artifacts": [],
@@ -91,7 +130,9 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
 
     monkeypatch.setattr(training.mlflow, "set_experiment", lambda value: None)
     monkeypatch.setattr(training.mlflow, "start_run", lambda **kwargs: RunContext())
-    monkeypatch.setattr(training.mlflow, "log_params", lambda values: None)
+    monkeypatch.setattr(
+        training.mlflow, "log_params", lambda values: calls["params"].append(values)
+    )
     monkeypatch.setattr(training.mlflow, "set_tags", lambda values: None)
     monkeypatch.setattr(
         training.mlflow,
@@ -119,6 +160,7 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
         "accepted": True,
         "acceptance_metric": "f1_weighted",
         "acceptance_threshold": 0.4,
+        "cv_mean_metrics": {name: 0.25 for name in training.SUMMARY_METRIC_NAMES},
         **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
     }
     model = SimpleNamespace(
@@ -138,12 +180,24 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
         label_encoder=label_encoder,
         training_params=training.XGBoostTrainingParams(),
         metrics_history=_metrics_history(2),
+        cv_metrics=_cv_metrics(),
+        cv_splits=3,
     )
 
     assert len(calls["summary"]) == 1
-    assert calls["summary"][0] == {name: 0.5 for name in training.SUMMARY_METRIC_NAMES}
+    assert calls["summary"][0] == {
+        **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
+        **{f"cv_mean_{name}": 0.25 for name in training.SUMMARY_METRIC_NAMES},
+    }
+    assert calls["params"][0]["cv_splits"] == 3
+    assert calls["params"][0]["validation_gap_hours"] == 24
+    assert calls["params"][0]["class_weighting"] == "balanced_sample_weight"
     assert len(calls["history"]) == 1
     assert calls["history"][0][0] == "run-123"
+    assert any(
+        metric.key == "cv_validation_f1_weighted" and metric.step == 3
+        for metric in calls["history"][0][1]
+    )
     assert calls["single_artifacts"] == []
     assert calls["artifact_dirs"] == [str(tmp_path)]
 
@@ -166,6 +220,8 @@ def test_training_excludes_legacy_summary_plot_and_preserves_diagnostic_artifact
     assert artifacts.feature_importance_plot_path.exists()
     assert artifacts.metrics_history_path.exists()
     assert artifacts.metrics_history_plot_path.exists()
+    assert artifacts.time_series_cv_metrics_path.exists()
+    assert artifacts.time_series_cv_plot_path.exists()
     assert artifacts.roc_curve_path is not None
     assert artifacts.roc_curve_path.exists()
 
@@ -173,3 +229,75 @@ def test_training_excludes_legacy_summary_plot_and_preserves_diagnostic_artifact
     assert list(feature_importance.columns) == ["feature", "importance"]
     assert set(feature_importance["feature"]) == set(training.DEFAULT_FEATURE_COLUMNS)
     assert feature_importance["importance"].is_monotonic_decreasing
+    metrics = json.loads(artifacts.metrics_path.read_text(encoding="utf-8"))
+    assert metrics["validation_strategy"] == "time_series_split"
+    assert metrics["cv_splits"] == 3
+    assert metrics["validation_gap_hours"] == 24
+    assert "f1_weighted" in metrics["cv_mean_metrics"]
+    assert len(pd.read_csv(artifacts.time_series_cv_metrics_path)) == 3
+
+
+def test_xgboost_removes_stale_roc_when_final_holdout_has_one_class(tmp_path) -> None:
+    stale_roc = tmp_path / "roc_auc_ovr.png"
+    stale_roc.write_bytes(b"stale")
+    frame = _training_frame()
+    frame.loc[frame.index[-48:], training.DEFAULT_TARGET] = "clear"
+
+    artifacts = training.train_weather_condition_model(
+        frame,
+        output_dir=str(tmp_path),
+        log_to_mlflow=False,
+        training_params=training.XGBoostTrainingParams(n_estimators=2),
+    )
+
+    assert artifacts.roc_curve_path is None
+    assert not stale_roc.exists()
+
+
+def test_historical_forecast_xgboost_uses_post_2021_enrichment_profile(tmp_path) -> None:
+    artifacts = training.train_historical_forecast_xgboost_model(
+        _historical_forecast_training_frame(),
+        output_dir=str(tmp_path),
+        log_to_mlflow=False,
+        training_params=training.XGBoostTrainingParams(n_estimators=2),
+    )
+
+    assert artifacts.model_path.name == "weather_condition_xgboost_historical_forecast_model.pkl"
+    feature_importance = pd.read_csv(artifacts.feature_importance_path)
+    assert set(feature_importance["feature"]) == set(training.HISTORICAL_FORECAST_FEATURE_COLUMNS)
+    assert {"cape", "freezing_level_height", "uv_index"} <= set(feature_importance["feature"])
+    metrics = json.loads(artifacts.metrics_path.read_text(encoding="utf-8"))
+    assert metrics["feature_columns"] == training.HISTORICAL_FORECAST_FEATURE_COLUMNS
+    assert metrics["train_start"] >= training.HISTORICAL_FORECAST_TRAINING_START
+
+
+def test_historical_forecast_xgboost_logs_to_separate_mlflow_identity(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def capture_mlflow_run(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(training, "_log_mlflow_run", capture_mlflow_run)
+    training.train_historical_forecast_xgboost_model(
+        _historical_forecast_training_frame(),
+        output_dir=str(tmp_path),
+        log_to_mlflow=True,
+        training_params=training.XGBoostTrainingParams(n_estimators=2),
+    )
+
+    assert captured["experiment_name"] == "weather-condition-xgboost-historical-forecast"
+    assert captured["mlflow_run_name"] == "xgboost-historical-forecast-weather-condition"
+    assert captured["training_scope"] == "historical_forecast_2021_03_23_plus"
+    assert captured["feature_columns"] == training.HISTORICAL_FORECAST_FEATURE_COLUMNS
+
+
+def test_historical_forecast_workflow_invokes_dedicated_training_command() -> None:
+    workflow = Path(".github/workflows/train-xgboost-historical-forecast-model.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "train_historical_forecast_xgboost_from_supabase" in workflow
+    assert "artifacts/xgboost-historical-forecast-training" in workflow
+    assert "OpenMeteo Supabase Pipeline" in workflow

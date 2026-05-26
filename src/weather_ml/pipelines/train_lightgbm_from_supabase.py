@@ -21,6 +21,7 @@ def run(
     max_rows: int | None = None,
     log_to_mlflow: bool = True,
     test_fraction: float = 0.2,
+    cv_splits: int = 3,
     training_params: LightGBMTrainingParams | None = None,
 ) -> None:
     supabase_url, supabase_key = require_supabase_rest_credentials()
@@ -46,6 +47,7 @@ def run(
         frame,
         output_dir=output_dir,
         test_fraction=test_fraction,
+        cv_splits=cv_splits,
         log_to_mlflow=log_to_mlflow,
         training_params=training_params,
     )
@@ -63,6 +65,7 @@ def main() -> None:
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--no-mlflow", action="store_true")
     parser.add_argument("--test-fraction", type=float, default=0.2)
+    parser.add_argument("--cv-splits", type=int, default=3)
     parser.add_argument("--n-estimators", type=int, default=500)
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--max-depth", type=int, default=5)
@@ -78,6 +81,7 @@ def main() -> None:
         max_rows=args.max_rows,
         log_to_mlflow=not args.no_mlflow,
         test_fraction=args.test_fraction,
+        cv_splits=args.cv_splits,
         training_params=LightGBMTrainingParams(
             n_estimators=args.n_estimators,
             learning_rate=args.learning_rate,

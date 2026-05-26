@@ -5,12 +5,15 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 
+import pandas as pd
+
+from weather_ml.config import get_settings
+from weather_ml.openmeteo import fetch_historical_forecast_hourly
+from weather_ml.openmeteo_features import map_weather_code_to_condition
 from weather_ml.pipelines.build_openmeteo_features import run as build_features
 from weather_ml.pipelines.download_openmeteo_archive import run as download_archive
 from weather_ml.pipelines.load_openmeteo_archive import run as load_archive
 from weather_ml.pipelines.load_openmeteo_features import run as load_features
-from weather_ml.openmeteo_features import map_weather_code_to_condition
-
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +40,14 @@ def run(
     download_archive(start_date=start_date, end_date=end_date)
     persist_cutoff = max_persist_observed_at or _default_persist_cutoff(end_date)
     _prepare_raw_upload_csv(raw_csv, raw_upload_csv, max_observed_at=persist_cutoff)
-    _prepare_raw_upload_csv(raw_csv, feature_context_csv)
+    settings = get_settings()
+    forecast_context = fetch_historical_forecast_hourly(
+        latitude=settings.openmeteo_lat,
+        longitude=settings.openmeteo_lon,
+        start_date=start_date or settings.openmeteo_start_date,
+        end_date=end_date or settings.openmeteo_end_date,
+    )
+    _prepare_feature_context_csv(raw_csv, feature_context_csv, forecast_context)
     build_features(
         input_csv=feature_context_csv,
         output_csv=feature_csv,
@@ -46,17 +56,31 @@ def run(
     )
 
     if push_raw:
-        load_archive(csv_path=raw_upload_csv, table_name=raw_table, conflict_column=raw_conflict_column, method=method)
+        load_archive(
+            csv_path=raw_upload_csv,
+            table_name=raw_table,
+            conflict_column=raw_conflict_column,
+            method=method,
+        )
     if push_features:
-        load_features(csv_path=feature_csv, table_name=feature_table, conflict_column=feature_conflict_column, method=method)
+        load_features(
+            csv_path=feature_csv,
+            table_name=feature_table,
+            conflict_column=feature_conflict_column,
+            method=method,
+        )
 
 
-def _prepare_raw_upload_csv(input_csv: str, output_csv: str, max_observed_at: str | None = None) -> None:
-    import pandas as pd
-
+def _prepare_raw_upload_csv(
+    input_csv: str, output_csv: str, max_observed_at: str | None = None
+) -> None:
     frame = pd.read_csv(input_csv)
-    frame = frame.drop(columns=[column for column in ["source", "location_name"] if column in frame.columns])
-    frame["observed_at"] = pd.to_datetime(frame["observed_at"], utc=True).dt.strftime("%Y-%m-%d %H:%M:%S")
+    frame = frame.drop(
+        columns=[column for column in ["source", "location_name"] if column in frame.columns]
+    )
+    frame["observed_at"] = pd.to_datetime(frame["observed_at"], utc=True).dt.strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
     if max_observed_at:
         cutoff = pd.to_datetime(max_observed_at)
         observed_for_filter = pd.to_datetime(frame["observed_at"])
@@ -65,7 +89,9 @@ def _prepare_raw_upload_csv(input_csv: str, output_csv: str, max_observed_at: st
     base = pd.Timestamp(date(2010, 1, 1))
     frame.insert(0, "id", ((observed - base) / pd.Timedelta(hours=1)).round().astype("int64") + 1)
     if "weather_code" in frame.columns:
-        frame["weather_code"] = pd.to_numeric(frame["weather_code"], errors="coerce").round().astype("Int64")
+        frame["weather_code"] = (
+            pd.to_numeric(frame["weather_code"], errors="coerce").round().astype("Int64")
+        )
         frame["weather_condition"] = frame["weather_code"].map(map_weather_code_to_condition)
     frame = frame.drop_duplicates(subset=["observed_at"], keep="last").reset_index(drop=True)
     Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +102,21 @@ def _prepare_raw_upload_csv(input_csv: str, output_csv: str, max_observed_at: st
         max_observed_at,
         output_csv,
     )
+
+
+def _prepare_feature_context_csv(
+    input_csv: str, output_csv: str, forecast_context: pd.DataFrame
+) -> None:
+    _prepare_raw_upload_csv(input_csv, output_csv)
+    frame = pd.read_csv(output_csv)
+    if not forecast_context.empty:
+        frame = frame.merge(forecast_context, on="observed_at", how="left", validate="one_to_one")
+    else:
+        frame["cape"] = pd.NA
+        frame["freezing_level_height"] = pd.NA
+        frame["uv_index"] = pd.NA
+    frame.to_csv(output_csv, index=False)
+    logger.info("merged historical-forecast context: rows=%s output=%s", len(frame), output_csv)
 
 
 def _default_persist_cutoff(end_date: str | None) -> str | None:
@@ -90,11 +131,23 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
-    parser.add_argument("--raw-csv", default="data/openmeteo_archive/Istanbul/latest/openmeteo_hourly.csv")
-    parser.add_argument("--raw-upload-csv", default="exports/openmeteo_hourly_istanbul_latest_supabase_import.csv")
-    parser.add_argument("--feature-context-csv", default="exports/openmeteo_hourly_istanbul_latest_feature_context.csv")
-    parser.add_argument("--feature-csv", default="exports/openmeteo_hourly_features_istanbul_latest_supabase_import.csv")
-    parser.add_argument("--feature-summary-json", default="exports/openmeteo_hourly_features_summary.json")
+    parser.add_argument(
+        "--raw-csv", default="data/openmeteo_archive/Istanbul/latest/openmeteo_hourly.csv"
+    )
+    parser.add_argument(
+        "--raw-upload-csv", default="exports/openmeteo_hourly_istanbul_latest_supabase_import.csv"
+    )
+    parser.add_argument(
+        "--feature-context-csv",
+        default="exports/openmeteo_hourly_istanbul_latest_feature_context.csv",
+    )
+    parser.add_argument(
+        "--feature-csv",
+        default="exports/openmeteo_hourly_features_istanbul_latest_supabase_import.csv",
+    )
+    parser.add_argument(
+        "--feature-summary-json", default="exports/openmeteo_hourly_features_summary.json"
+    )
     parser.add_argument("--method", choices=["postgres", "rest"], default="rest")
     parser.add_argument("--raw-table", default="KadikoyWeatherCodeRaw")
     parser.add_argument("--feature-table", default="KadikoyWeatherCodeFeature")

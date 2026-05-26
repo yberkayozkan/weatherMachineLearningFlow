@@ -7,7 +7,6 @@ from weather_ml.config import get_settings, require_supabase_rest_credentials
 from weather_ml.supabase_rest import classify_supabase_key, read_table_rest
 from weather_ml.training import XGBoostTrainingParams, train_weather_condition_model
 
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -19,6 +18,7 @@ def run(
     max_rows: int | None = None,
     log_to_mlflow: bool = True,
     test_fraction: float = 0.2,
+    cv_splits: int = 3,
     training_params: XGBoostTrainingParams | None = None,
 ) -> None:
     supabase_url, supabase_key = require_supabase_rest_credentials()
@@ -56,10 +56,16 @@ def run(
         frame,
         output_dir=output_dir,
         test_fraction=test_fraction,
+        cv_splits=cv_splits,
         log_to_mlflow=log_to_mlflow,
         training_params=training_params,
     )
-    logger.info("trained model: model=%s metrics=%s predictions=%s", artifacts.model_path, artifacts.metrics_path, artifacts.predictions_path)
+    logger.info(
+        "trained model: model=%s metrics=%s predictions=%s",
+        artifacts.model_path,
+        artifacts.metrics_path,
+        artifacts.predictions_path,
+    )
 
 
 def main() -> None:
@@ -69,6 +75,7 @@ def main() -> None:
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--no-mlflow", action="store_true")
     parser.add_argument("--test-fraction", type=float, default=0.2)
+    parser.add_argument("--cv-splits", type=int, default=3)
     parser.add_argument("--n-estimators", type=int, default=500)
     parser.add_argument("--max-depth", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=0.05)
@@ -83,6 +90,7 @@ def main() -> None:
         max_rows=args.max_rows,
         log_to_mlflow=not args.no_mlflow,
         test_fraction=args.test_fraction,
+        cv_splits=args.cv_splits,
         training_params=XGBoostTrainingParams(
             n_estimators=args.n_estimators,
             max_depth=args.max_depth,

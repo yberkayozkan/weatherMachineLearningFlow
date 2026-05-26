@@ -19,11 +19,17 @@ from weather_ml.training import (
     DEFAULT_FEATURE_COLUMNS,
     DEFAULT_TARGET,
     SUMMARY_METRIC_NAMES,
+    VALIDATION_GAP_HOURS,
     TrainingArtifacts,
+    _add_time_series_validation_metrics,
     _assert_training_contract,
+    _build_balanced_sample_weight,
+    _build_cv_fold_row,
     _build_feature_importance,
     _build_metrics,
+    _build_mlflow_cv_metrics,
     _build_mlflow_history_metrics,
+    _build_temporal_validation_split,
     _log_mlflow_metric_batches,
     _prepare_training_frame,
     _safe_log_loss,
@@ -32,6 +38,7 @@ from weather_ml.training import (
     _write_feature_importance_plot,
     _write_metrics_history_plot,
     _write_roc_curve,
+    _write_time_series_cv_plot,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +62,7 @@ def train_lightgbm_weather_condition_model(
     output_dir: str = "artifacts/lightgbm-training",
     target_column: str = DEFAULT_TARGET,
     test_fraction: float = 0.2,
+    cv_splits: int = 3,
     experiment_name: str = "weather-condition-lightgbm",
     log_to_mlflow: bool = True,
     training_params: LightGBMTrainingParams | None = None,
@@ -62,12 +70,11 @@ def train_lightgbm_weather_condition_model(
     _assert_training_contract(target_column)
     params = training_params or LightGBMTrainingParams()
     data = _prepare_training_frame(frame, target_column=target_column)
-    split_index = int(len(data) * (1 - test_fraction))
-    if split_index <= 0 or split_index >= len(data):
-        raise ValueError("Not enough rows for train/test split.")
-
-    train = data.iloc[:split_index]
-    test = data.iloc[split_index:]
+    temporal_split = _build_temporal_validation_split(
+        data, test_fraction=test_fraction, cv_splits=cv_splits
+    )
+    train = temporal_split.final_train
+    test = temporal_split.final_test
     x_train = train[DEFAULT_FEATURE_COLUMNS]
     y_train_raw = train[target_column].astype(str)
     x_test = test[DEFAULT_FEATURE_COLUMNS]
@@ -78,28 +85,22 @@ def train_lightgbm_weather_condition_model(
     y_train = label_encoder.transform(y_train_raw)
     y_test = label_encoder.transform(y_test_raw)
 
-    model = lgb.LGBMClassifier(
-        objective="multiclass",
-        num_class=len(label_encoder.classes_),
-        n_estimators=params.n_estimators,
-        learning_rate=params.learning_rate,
-        max_depth=params.max_depth,
-        num_leaves=params.num_leaves,
-        subsample=params.subsample,
-        subsample_freq=1,
-        colsample_bytree=params.colsample_bytree,
-        reg_lambda=params.reg_lambda,
-        random_state=42,
-        n_jobs=-1,
-        verbosity=-1,
+    cv_metrics = _build_lightgbm_time_series_cv_metrics(
+        train=train,
+        cv_indices=temporal_split.cv_indices,
+        target_column=target_column,
+        test_fraction=test_fraction,
+        label_encoder=label_encoder,
+        training_params=params,
     )
+    model = _build_lightgbm_classifier(params, len(label_encoder.classes_))
     logger.info(
         "starting LightGBM training: rows_train=%s rows_test=%s n_estimators=%s",
         len(train),
         len(test),
         params.n_estimators,
     )
-    model.fit(x_train, y_train)
+    model.fit(x_train, y_train, sample_weight=_build_balanced_sample_weight(y_train))
     predicted_labels = model.predict(x_test).astype(int)
     predicted_conditions = label_encoder.inverse_transform(predicted_labels)
     probabilities = model.predict_proba(x_test)
@@ -127,6 +128,7 @@ def train_lightgbm_weather_condition_model(
             "objective": "multiclass",
         },
     )
+    _add_time_series_validation_metrics(metrics, cv_metrics=cv_metrics, cv_splits=cv_splits)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -138,6 +140,8 @@ def train_lightgbm_weather_condition_model(
     feature_importance_path = out / "feature_importance.csv"
     feature_importance_plot_path = out / "feature_importance.png"
     metrics_history_plot_path = out / "metrics_history.png"
+    time_series_cv_metrics_path = out / "time_series_cv_metrics.csv"
+    time_series_cv_plot_path = out / "time_series_cv_metrics.png"
     roc_curve_path = out / "roc_auc_ovr.png"
 
     with model_path.open("wb") as file:
@@ -164,9 +168,11 @@ def train_lightgbm_weather_condition_model(
     )
     metrics["metrics_history_csv"] = str(metrics_history_path)
     metrics["feature_importance_csv"] = str(feature_importance_path)
+    metrics["time_series_cv_metrics_csv"] = str(time_series_cv_metrics_path)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     feature_importance.to_csv(feature_importance_path, index=False)
     metrics_history.to_csv(metrics_history_path, index=False)
+    cv_metrics.to_csv(time_series_cv_metrics_path, index=False)
     pd.DataFrame(
         {
             "observed_at": test["observed_at"].dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -180,6 +186,7 @@ def train_lightgbm_weather_condition_model(
         feature_importance_plot_path, feature_importance, model_name="LightGBM"
     )
     _write_metrics_history_plot(metrics_history_plot_path, metrics_history)
+    _write_time_series_cv_plot(time_series_cv_plot_path, cv_metrics)
     roc_curve_written = _write_roc_curve(
         roc_curve_path, y_test, probabilities, label_encoder.classes_
     )
@@ -193,6 +200,8 @@ def train_lightgbm_weather_condition_model(
             label_encoder=label_encoder,
             training_params=params,
             metrics_history=metrics_history,
+            cv_metrics=cv_metrics,
+            cv_splits=cv_splits,
         )
 
     return TrainingArtifacts(
@@ -204,8 +213,71 @@ def train_lightgbm_weather_condition_model(
         feature_importance_plot_path=feature_importance_plot_path,
         metrics_history_path=metrics_history_path,
         metrics_history_plot_path=metrics_history_plot_path,
+        time_series_cv_metrics_path=time_series_cv_metrics_path,
+        time_series_cv_plot_path=time_series_cv_plot_path,
         roc_curve_path=roc_curve_path if roc_curve_written else None,
     )
+
+
+def _build_lightgbm_classifier(
+    params: LightGBMTrainingParams, class_count: int
+) -> lgb.LGBMClassifier:
+    return lgb.LGBMClassifier(
+        objective="multiclass",
+        num_class=class_count,
+        n_estimators=params.n_estimators,
+        learning_rate=params.learning_rate,
+        max_depth=params.max_depth,
+        num_leaves=params.num_leaves,
+        subsample=params.subsample,
+        subsample_freq=1,
+        colsample_bytree=params.colsample_bytree,
+        reg_lambda=params.reg_lambda,
+        random_state=42,
+        n_jobs=-1,
+        verbosity=-1,
+    )
+
+
+def _build_lightgbm_time_series_cv_metrics(
+    *,
+    train: pd.DataFrame,
+    cv_indices: list[tuple[np.ndarray, np.ndarray]],
+    target_column: str,
+    test_fraction: float,
+    label_encoder: LabelEncoder,
+    training_params: LightGBMTrainingParams,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for fold, (train_indices, validation_indices) in enumerate(cv_indices, start=1):
+        fold_train = train.iloc[train_indices]
+        validation = train.iloc[validation_indices]
+        model = _build_lightgbm_classifier(training_params, len(label_encoder.classes_))
+        model.fit(
+            fold_train[DEFAULT_FEATURE_COLUMNS],
+            label_encoder.transform(fold_train[target_column].astype(str)),
+            sample_weight=_build_balanced_sample_weight(
+                label_encoder.transform(fold_train[target_column].astype(str))
+            ),
+        )
+        y_validation = label_encoder.transform(validation[target_column].astype(str))
+        probabilities = model.predict_proba(validation[DEFAULT_FEATURE_COLUMNS])
+        predicted_labels = probabilities.argmax(axis=1)
+        fold_metrics = _build_metrics(
+            y_test=y_validation,
+            predicted_labels=predicted_labels,
+            probabilities=probabilities,
+            label_encoder=label_encoder,
+            test_fraction=test_fraction,
+            train=fold_train,
+            test=validation,
+            target_column=target_column,
+            acceptance_threshold=training_params.acceptance_threshold,
+            model_params_name="lightgbm_params",
+            model_params={},
+        )
+        rows.append(_build_cv_fold_row(fold, fold_train, validation, fold_metrics))
+    return pd.DataFrame(rows)
 
 
 def _build_lightgbm_metrics_history(
@@ -267,6 +339,8 @@ def _log_lightgbm_mlflow_run(
     label_encoder: LabelEncoder,
     training_params: LightGBMTrainingParams,
     metrics_history: pd.DataFrame,
+    cv_metrics: pd.DataFrame,
+    cv_splits: int,
 ) -> None:
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     if tracking_uri:
@@ -287,6 +361,10 @@ def _log_lightgbm_mlflow_run(
                 "reg_lambda": training_params.reg_lambda,
                 "acceptance_threshold": training_params.acceptance_threshold,
                 "classes": ",".join(label_encoder.classes_),
+                "validation_strategy": "time_series_split",
+                "cv_splits": cv_splits,
+                "validation_gap_hours": VALIDATION_GAP_HOURS,
+                "class_weighting": "balanced_sample_weight",
             }
         )
         mlflow.set_tags(
@@ -296,14 +374,21 @@ def _log_lightgbm_mlflow_run(
                 "acceptance_threshold": str(metrics["acceptance_threshold"]),
             }
         )
-        mlflow.log_metrics(
+        summary_metrics = {
+            key: float(metrics[key]) for key in SUMMARY_METRIC_NAMES if metrics[key] is not None
+        }
+        summary_metrics.update(
             {
-                key: float(metrics[key])
-                for key in SUMMARY_METRIC_NAMES
-                if metrics[key] is not None
+                f"cv_mean_{key}": float(value)
+                for key, value in metrics["cv_mean_metrics"].items()
+                if value is not None
             }
         )
-        history_metrics = _build_mlflow_history_metrics(metrics_history)
+        mlflow.log_metrics(summary_metrics)
+        history_metrics = [
+            *_build_mlflow_history_metrics(metrics_history),
+            *_build_mlflow_cv_metrics(cv_metrics),
+        ]
         _log_mlflow_metric_batches(run.info.run_id, history_metrics)
         mlflow.log_artifacts(str(output_dir))
     logger.info("completed LightGBM MLflow upload: history_metrics=%s", len(history_metrics))

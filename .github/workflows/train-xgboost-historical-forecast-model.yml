@@ -1,4 +1,4 @@
-name: Train Weather Model
+name: Train XGBoost Historical Forecast Weather Model
 
 on:
   workflow_dispatch:
@@ -36,7 +36,7 @@ on:
         required: false
         default: "3"
       max_rows:
-        description: "Optional row limit; blank means full table"
+        description: "Optional latest eligible row limit; blank means full 2021+ range"
         required: false
         default: ""
       acceptance_threshold:
@@ -48,7 +48,7 @@ on:
     types: [completed]
 
 concurrency:
-  group: weather-training
+  group: weather-xgboost-historical-forecast-training
   cancel-in-progress: false
 
 jobs:
@@ -91,12 +91,12 @@ jobs:
       - name: Run tests
         run: pytest -q
 
-      - name: Train model from Supabase
+      - name: Train Historical Forecast XGBoost model from Supabase
         shell: bash
         run: |
           args=(
             --table-name "$SUPABASE_FEATURE_TABLE"
-            --output-dir artifacts/training
+            --output-dir artifacts/xgboost-historical-forecast-training
             --n-estimators "$TRAIN_N_ESTIMATORS"
             --max-depth "$TRAIN_MAX_DEPTH"
             --learning-rate "$TRAIN_LEARNING_RATE"
@@ -110,10 +110,10 @@ jobs:
           if [ -n "$TRAIN_MAX_ROWS" ]; then
             args+=(--max-rows "$TRAIN_MAX_ROWS")
           fi
-          python -m weather_ml.pipelines.train_from_supabase "${args[@]}"
+          python -m weather_ml.pipelines.train_historical_forecast_xgboost_from_supabase "${args[@]}"
 
-      - name: Upload training artifacts
+      - name: Upload Historical Forecast XGBoost training artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: weather-training-artifacts
-          path: artifacts/training
+          name: weather-xgboost-historical-forecast-training-artifacts
+          path: artifacts/xgboost-historical-forecast-training

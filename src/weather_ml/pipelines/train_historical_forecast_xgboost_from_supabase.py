@@ -5,28 +5,62 @@ import logging
 
 import pandas as pd
 
-from weather_ml.training import XGBoostTrainingParams, train_weather_condition_model
+from weather_ml.config import get_settings, require_supabase_rest_credentials
+from weather_ml.supabase_rest import classify_supabase_key, read_table_rest
+from weather_ml.training import (
+    HISTORICAL_FORECAST_TRAINING_START,
+    XGBoostTrainingParams,
+    train_historical_forecast_xgboost_model,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-DEFAULT_CSV_PATH = "exports/openmeteo_hourly_features_istanbul_2010_2026_supabase_import_clean.csv"
 
 
 def run(
     *,
-    csv_path: str = DEFAULT_CSV_PATH,
-    output_dir: str = "artifacts/training",
+    table_name: str = "KadikoyWeatherCodeFeature",
+    output_dir: str = "artifacts/xgboost-historical-forecast-training",
     max_rows: int | None = None,
     log_to_mlflow: bool = True,
     test_fraction: float = 0.2,
     cv_splits: int = 3,
     training_params: XGBoostTrainingParams | None = None,
 ) -> None:
-    frame = pd.read_csv(csv_path)
+    supabase_url, supabase_key = require_supabase_rest_credentials()
+    key_type = classify_supabase_key(supabase_key)
+    settings = get_settings()
+    if settings.supabase_service_role_key and key_type == "publishable":
+        raise RuntimeError(
+            "SUPABASE_SERVICE_ROLE_KEY contains a publishable key. "
+            "Training reads Supabase through REST and needs the service_role/secret key "
+            "so RLS does not hide rows."
+        )
+    if not settings.supabase_service_role_key:
+        logger.warning(
+            "SUPABASE_SERVICE_ROLE_KEY is not set; falling back to SUPABASE_KEY. "
+            "If RLS is enabled, the feature table may appear empty."
+        )
+    frame = read_table_rest(
+        supabase_url=supabase_url,
+        supabase_key=supabase_key,
+        table_name=table_name,
+        order_by="observed_at",
+    )
+    if frame.empty:
+        raise RuntimeError(f"Supabase feature table is empty: {table_name}.")
+
+    timestamps = pd.to_datetime(frame["observed_at"], errors="coerce")
+    frame = frame.loc[timestamps >= pd.Timestamp(HISTORICAL_FORECAST_TRAINING_START)].copy()
     if max_rows is not None:
-        frame = frame.head(max_rows)
-    logger.info("read feature csv: csv=%s rows=%s", csv_path, len(frame))
-    artifacts = train_weather_condition_model(
+        frame = frame.tail(max_rows)
+    logger.info(
+        "read Historical Forecast training rows: table=%s start=%s rows=%s",
+        table_name,
+        HISTORICAL_FORECAST_TRAINING_START,
+        len(frame),
+    )
+    artifacts = train_historical_forecast_xgboost_model(
         frame,
         output_dir=output_dir,
         test_fraction=test_fraction,
@@ -35,7 +69,7 @@ def run(
         training_params=training_params,
     )
     logger.info(
-        "trained model: model=%s metrics=%s predictions=%s",
+        "trained Historical Forecast XGBoost model: model=%s metrics=%s predictions=%s",
         artifacts.model_path,
         artifacts.metrics_path,
         artifacts.predictions_path,
@@ -44,11 +78,8 @@ def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--csv-path",
-        default=DEFAULT_CSV_PATH,
-    )
-    parser.add_argument("--output-dir", default="artifacts/training")
+    parser.add_argument("--table-name", default="KadikoyWeatherCodeFeature")
+    parser.add_argument("--output-dir", default="artifacts/xgboost-historical-forecast-training")
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--no-mlflow", action="store_true")
     parser.add_argument("--test-fraction", type=float, default=0.2)
@@ -62,7 +93,7 @@ def main() -> None:
     parser.add_argument("--acceptance-threshold", type=float, default=0.40)
     args = parser.parse_args()
     run(
-        csv_path=args.csv_path,
+        table_name=args.table_name,
         output_dir=args.output_dir,
         max_rows=args.max_rows,
         log_to_mlflow=not args.no_mlflow,

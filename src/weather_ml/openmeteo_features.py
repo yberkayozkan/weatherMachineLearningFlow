@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
-
 
 REQUIRED_OPENMETEO_COLUMNS = [
     "observed_at",
     "temperature_2m",
     "relative_humidity_2m",
     "dew_point_2m",
+    "temperature_2m_max",
+    "temperature_2m_min",
     "apparent_temperature",
     "rain",
     "weather_code",
     "pressure_msl",
     "surface_pressure",
     "cloud_cover",
+    "cloud_cover_low",
+    "cloud_cover_mid",
+    "cloud_cover_high",
     "wind_speed_10m",
     "wind_direction_10m",
     "wind_gusts_10m",
@@ -33,13 +38,26 @@ FEATURE_UPLOAD_COLUMNS = [
     "temperature_2m",
     "relative_humidity_2m",
     "dew_point_2m",
+    "dew_point_spread",
+    "temperature_2m_max",
+    "temperature_2m_min",
+    "temperature_2m_max_lag_1d",
+    "temperature_2m_min_lag_1d",
+    "cape",
+    "freezing_level_height",
+    "uv_index",
     "apparent_temperature",
     "rain",
     "pressure_msl",
     "surface_pressure",
     "cloud_cover",
+    "cloud_cover_low",
+    "cloud_cover_mid",
+    "cloud_cover_high",
     "wind_speed_10m",
     "wind_direction_10m",
+    "wind_u_10m",
+    "wind_v_10m",
     "wind_gusts_10m",
     "weather_code",
     "weather_condition",
@@ -154,6 +172,9 @@ def build_openmeteo_hourly_features(raw: pd.DataFrame) -> pd.DataFrame:
         "pressure_msl",
         "surface_pressure",
         "cloud_cover",
+        "cloud_cover_low",
+        "cloud_cover_mid",
+        "cloud_cover_high",
         "wind_speed_10m",
         "wind_direction_10m",
         "wind_gusts_10m",
@@ -169,23 +190,68 @@ def build_openmeteo_hourly_features(raw: pd.DataFrame) -> pd.DataFrame:
     features["temperature_2m"] = frame["temperature_2m"]
     features["relative_humidity_2m"] = frame["relative_humidity_2m"]
     features["dew_point_2m"] = frame["dew_point_2m"]
+    features["dew_point_spread"] = frame["temperature_2m"] - frame["dew_point_2m"]
+    features["temperature_2m_max"] = pd.to_numeric(frame["temperature_2m_max"], errors="coerce")
+    features["temperature_2m_min"] = pd.to_numeric(frame["temperature_2m_min"], errors="coerce")
+    observed_dates = frame["observed_at"].dt.normalize()
+    daily_max = (
+        pd.Series(features["temperature_2m_max"].to_numpy(), index=observed_dates)
+        .groupby(level=0)
+        .first()
+    )
+    daily_min = (
+        pd.Series(features["temperature_2m_min"].to_numpy(), index=observed_dates)
+        .groupby(level=0)
+        .first()
+    )
+    features["temperature_2m_max_lag_1d"] = (observed_dates - pd.Timedelta(days=1)).map(daily_max)
+    features["temperature_2m_min_lag_1d"] = (observed_dates - pd.Timedelta(days=1)).map(daily_min)
+    features["cape"] = (
+        pd.to_numeric(frame["cape"], errors="coerce") if "cape" in frame.columns else pd.NA
+    )
+    features["freezing_level_height"] = (
+        pd.to_numeric(frame["freezing_level_height"], errors="coerce")
+        if "freezing_level_height" in frame.columns
+        else pd.NA
+    )
+    features["uv_index"] = (
+        pd.to_numeric(frame["uv_index"], errors="coerce") if "uv_index" in frame.columns else pd.NA
+    )
     features["apparent_temperature"] = frame["apparent_temperature"]
     features["rain"] = frame["rain"].fillna(0)
     features["pressure_msl"] = frame["pressure_msl"]
     features["surface_pressure"] = frame["surface_pressure"]
     features["cloud_cover"] = frame["cloud_cover"]
+    features["cloud_cover_low"] = frame["cloud_cover_low"]
+    features["cloud_cover_mid"] = frame["cloud_cover_mid"]
+    features["cloud_cover_high"] = frame["cloud_cover_high"]
     features["wind_speed_10m"] = frame["wind_speed_10m"]
     features["wind_direction_10m"] = frame["wind_direction_10m"]
+    wind_direction_radians = np.radians(frame["wind_direction_10m"])
+    features["wind_u_10m"] = -frame["wind_speed_10m"] * np.sin(wind_direction_radians)
+    features["wind_v_10m"] = -frame["wind_speed_10m"] * np.cos(wind_direction_radians)
     features["wind_gusts_10m"] = frame["wind_gusts_10m"]
-    features["weather_code"] = pd.to_numeric(frame["weather_code"], errors="coerce").round().astype("Int64")
+    features["weather_code"] = (
+        pd.to_numeric(frame["weather_code"], errors="coerce").round().astype("Int64")
+    )
     features["weather_condition"] = features["weather_code"].map(map_weather_code_to_condition)
     features["weather_code_lag_4h"] = features["weather_code"].shift(4)
     features["weather_code_lag_12h"] = features["weather_code"].shift(12)
-    features["weather_condition_lag_4h"] = features["weather_code_lag_4h"].map(map_weather_code_to_condition)
-    features["weather_condition_lag_12h"] = features["weather_code_lag_12h"].map(map_weather_code_to_condition)
-    condition_to_code = {condition: index for index, condition in enumerate(WEATHER_CONDITION_LABELS)}
-    features["weather_condition_lag_4h_code"] = features["weather_condition_lag_4h"].map(condition_to_code).astype("Int64")
-    features["weather_condition_lag_12h_code"] = features["weather_condition_lag_12h"].map(condition_to_code).astype("Int64")
+    features["weather_condition_lag_4h"] = features["weather_code_lag_4h"].map(
+        map_weather_code_to_condition
+    )
+    features["weather_condition_lag_12h"] = features["weather_code_lag_12h"].map(
+        map_weather_code_to_condition
+    )
+    condition_to_code = {
+        condition: index for index, condition in enumerate(WEATHER_CONDITION_LABELS)
+    }
+    features["weather_condition_lag_4h_code"] = (
+        features["weather_condition_lag_4h"].map(condition_to_code).astype("Int64")
+    )
+    features["weather_condition_lag_12h_code"] = (
+        features["weather_condition_lag_12h"].map(condition_to_code).astype("Int64")
+    )
 
     features["temp_lag_1h"] = frame["temperature_2m"].shift(1)
     features["temp_lag_3h"] = frame["temperature_2m"].shift(3)
@@ -197,11 +263,15 @@ def build_openmeteo_hourly_features(raw: pd.DataFrame) -> pd.DataFrame:
     features["temp_rolling_std_24h"] = frame["temperature_2m"].rolling(24, min_periods=2).std()
 
     features["humidity_lag_1h"] = frame["relative_humidity_2m"].shift(1)
-    features["humidity_rolling_mean_6h"] = frame["relative_humidity_2m"].rolling(6, min_periods=1).mean()
+    features["humidity_rolling_mean_6h"] = (
+        frame["relative_humidity_2m"].rolling(6, min_periods=1).mean()
+    )
     features["pressure_lag_1h"] = frame["pressure_msl"].shift(1)
     features["pressure_change_3h"] = frame["pressure_msl"] - frame["pressure_msl"].shift(3)
     features["wind_speed_lag_1h"] = frame["wind_speed_10m"].shift(1)
-    features["wind_speed_rolling_mean_6h"] = frame["wind_speed_10m"].rolling(6, min_periods=1).mean()
+    features["wind_speed_rolling_mean_6h"] = (
+        frame["wind_speed_10m"].rolling(6, min_periods=1).mean()
+    )
     features["rain_rolling_sum_6h"] = features["rain"].rolling(6, min_periods=1).sum()
     features["rain_rolling_sum_24h"] = features["rain"].rolling(24, min_periods=1).sum()
 
@@ -230,7 +300,9 @@ def clean_features_for_training(features: pd.DataFrame) -> pd.DataFrame:
 
 def validate_feature_upload_frame(frame: pd.DataFrame) -> None:
     missing = [column for column in FEATURE_UPLOAD_COLUMNS if column not in frame.columns]
-    extra_future_targets = [column for column in FORBIDDEN_FUTURE_TARGET_COLUMNS if column in frame.columns]
+    extra_future_targets = [
+        column for column in FORBIDDEN_FUTURE_TARGET_COLUMNS if column in frame.columns
+    ]
     if missing or extra_future_targets:
         details: list[str] = []
         if missing:
@@ -240,4 +312,7 @@ def validate_feature_upload_frame(frame: pd.DataFrame) -> None:
         raise ValueError("Invalid weather feature frame; " + "; ".join(details))
 
     if list(frame.columns) != FEATURE_UPLOAD_COLUMNS:
-        raise ValueError("Invalid weather feature frame; CSV columns must match the Supabase feature schema order.")
+        raise ValueError(
+            "Invalid weather feature frame; CSV columns must match "
+            "the Supabase feature schema order."
+        )

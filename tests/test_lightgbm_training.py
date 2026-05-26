@@ -7,12 +7,9 @@ import pandas as pd
 from weather_ml import lightgbm_training, training
 
 
-def _training_frame(row_count: int = 48) -> pd.DataFrame:
+def _training_frame(row_count: int = 240) -> pd.DataFrame:
     frame = pd.DataFrame(
-        {
-            column: np.linspace(0.0, 1.0, row_count)
-            for column in training.DEFAULT_FEATURE_COLUMNS
-        }
+        {column: np.linspace(0.0, 1.0, row_count) for column in training.DEFAULT_FEATURE_COLUMNS}
     )
     frame["observed_at"] = pd.date_range("2026-01-01", periods=row_count, freq="h")
     frame[training.DEFAULT_TARGET] = [
@@ -41,6 +38,18 @@ def _metrics_history() -> pd.DataFrame:
     )
 
 
+def _cv_metrics() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "fold": fold,
+                **{name: 0.4 + fold / 10 for name in training.SUMMARY_METRIC_NAMES},
+            }
+            for fold in range(1, 4)
+        ]
+    )
+
+
 def test_lightgbm_training_writes_diagnostic_artifacts(tmp_path) -> None:
     artifacts = lightgbm_training.train_lightgbm_weather_condition_model(
         _training_frame(),
@@ -58,6 +67,8 @@ def test_lightgbm_training_writes_diagnostic_artifacts(tmp_path) -> None:
     assert artifacts.feature_importance_plot_path.exists()
     assert artifacts.metrics_history_path.exists()
     assert artifacts.metrics_history_plot_path.exists()
+    assert artifacts.time_series_cv_metrics_path.exists()
+    assert artifacts.time_series_cv_plot_path.exists()
     assert artifacts.roc_curve_path is not None
     assert artifacts.roc_curve_path.exists()
 
@@ -67,6 +78,10 @@ def test_lightgbm_training_writes_diagnostic_artifacts(tmp_path) -> None:
     metrics = json.loads(artifacts.metrics_path.read_text(encoding="utf-8"))
     assert "lightgbm_params" in metrics
     assert "xgboost_params" not in metrics
+    assert metrics["validation_strategy"] == "time_series_split"
+    assert metrics["cv_splits"] == 3
+    assert metrics["validation_gap_hours"] == 24
+    assert len(pd.read_csv(artifacts.time_series_cv_metrics_path)) == 3
 
 
 def test_lightgbm_history_uses_iteration_steps() -> None:
@@ -143,6 +158,7 @@ def test_lightgbm_mlflow_logs_params_metrics_history_and_artifacts(monkeypatch, 
         "accepted": True,
         "acceptance_metric": "f1_weighted",
         "acceptance_threshold": 0.4,
+        "cv_mean_metrics": {name: 0.25 for name in training.SUMMARY_METRIC_NAMES},
         **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
     }
     model = SimpleNamespace(
@@ -162,11 +178,40 @@ def test_lightgbm_mlflow_logs_params_metrics_history_and_artifacts(monkeypatch, 
         label_encoder=SimpleNamespace(classes_=["clear", "rain"]),
         training_params=lightgbm_training.LightGBMTrainingParams(),
         metrics_history=_metrics_history(),
+        cv_metrics=_cv_metrics(),
+        cv_splits=3,
     )
 
     assert calls["experiments"] == ["weather-condition-lightgbm"]
     assert calls["run_names"] == ["lightgbm-weather-condition"]
     assert calls["params"][0]["model_type"] == "LGBMClassifier"
-    assert calls["summary"][0] == {name: 0.5 for name in training.SUMMARY_METRIC_NAMES}
+    assert calls["params"][0]["cv_splits"] == 3
+    assert calls["params"][0]["validation_gap_hours"] == 24
+    assert calls["params"][0]["class_weighting"] == "balanced_sample_weight"
+    assert calls["summary"][0] == {
+        **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
+        **{f"cv_mean_{name}": 0.25 for name in training.SUMMARY_METRIC_NAMES},
+    }
     assert calls["history"][0][0] == "lightgbm-run"
+    assert any(
+        metric.key == "cv_validation_f1_weighted" and metric.step == 3
+        for metric in calls["history"][0][1]
+    )
     assert calls["artifacts"] == [str(tmp_path)]
+
+
+def test_lightgbm_removes_stale_roc_when_final_holdout_has_one_class(tmp_path) -> None:
+    stale_roc = tmp_path / "roc_auc_ovr.png"
+    stale_roc.write_bytes(b"stale")
+    frame = _training_frame()
+    frame.loc[frame.index[-48:], training.DEFAULT_TARGET] = "clear"
+
+    artifacts = lightgbm_training.train_lightgbm_weather_condition_model(
+        frame,
+        output_dir=str(tmp_path),
+        log_to_mlflow=False,
+        training_params=lightgbm_training.LightGBMTrainingParams(n_estimators=3),
+    )
+
+    assert artifacts.roc_curve_path is None
+    assert not stale_roc.exists()
