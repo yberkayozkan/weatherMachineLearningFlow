@@ -40,6 +40,7 @@ def _metrics_history(row_count: int) -> pd.DataFrame:
                 "accuracy": 0.9,
                 "precision_weighted": 0.8,
                 "recall_weighted": 0.7,
+                "f1_macro": 0.65,
                 "f1_weighted": 0.75,
                 "roc_auc_ovr_weighted": 0.85,
                 "log_loss": 0.2,
@@ -80,19 +81,22 @@ def test_build_mlflow_history_metrics_preserves_names_steps_and_skips_missing_va
 
     metrics = training._build_mlflow_history_metrics(history)
 
-    assert len(metrics) == 10
+    assert len(metrics) == 12
     assert {(metric.key, metric.step) for metric in metrics} >= {
         ("train_accuracy", 1),
+        ("test_f1_macro", 2),
         ("test_f1_weighted", 2),
     }
     assert not any(metric.key == "train_roc_auc_ovr_weighted" for metric in metrics)
     assert not any(metric.key == "test_log_loss" for metric in metrics)
 
 
-def test_balanced_sample_weight_increases_minority_class_weight() -> None:
-    weights = training._build_balanced_sample_weight(np.array([0, 0, 0, 1]))
+def test_sqrt_balanced_sample_weight_softens_minority_class_weight() -> None:
+    weights = training._build_sqrt_balanced_sample_weight(np.array([0, 0, 0, 1]))
+    balanced_weights = np.array([2 / 3, 2 / 3, 2 / 3, 2])
 
     assert weights[-1] > weights[0]
+    np.testing.assert_allclose(weights, np.sqrt(balanced_weights))
 
 
 def test_log_mlflow_metric_batches_splits_1200_metrics(monkeypatch) -> None:
@@ -108,8 +112,8 @@ def test_log_mlflow_metric_batches_splits_1200_metrics(monkeypatch) -> None:
 
     training._log_mlflow_metric_batches("run-123", metrics)
 
-    assert len(metrics) == 1200
-    assert [len(batch) for batch in captured_batches] == [500, 500, 200]
+    assert len(metrics) == 1400
+    assert [len(batch) for batch in captured_batches] == [500, 500, 400]
 
 
 def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch, tmp_path) -> None:
@@ -158,7 +162,7 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
     metrics = {
         "target_column": training.DEFAULT_TARGET,
         "accepted": True,
-        "acceptance_metric": "f1_weighted",
+        "acceptance_metric": "f1_macro",
         "acceptance_threshold": 0.4,
         "cv_mean_metrics": {name: 0.25 for name in training.SUMMARY_METRIC_NAMES},
         **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
@@ -191,11 +195,11 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
     }
     assert calls["params"][0]["cv_splits"] == 3
     assert calls["params"][0]["validation_gap_hours"] == 24
-    assert calls["params"][0]["class_weighting"] == "balanced_sample_weight"
+    assert calls["params"][0]["class_weighting"] == "sqrt_balanced_sample_weight"
     assert len(calls["history"]) == 1
     assert calls["history"][0][0] == "run-123"
     assert any(
-        metric.key == "cv_validation_f1_weighted" and metric.step == 3
+        metric.key == "cv_validation_f1_macro" and metric.step == 3
         for metric in calls["history"][0][1]
     )
     assert calls["single_artifacts"] == []
@@ -233,6 +237,10 @@ def test_training_excludes_legacy_summary_plot_and_preserves_diagnostic_artifact
     assert metrics["validation_strategy"] == "time_series_split"
     assert metrics["cv_splits"] == 3
     assert metrics["validation_gap_hours"] == 24
+    assert metrics["acceptance_metric"] == "f1_macro"
+    assert metrics["accepted"] == (
+        metrics["f1_macro"] >= training.XGBoostTrainingParams(n_estimators=2).acceptance_threshold
+    )
     assert "f1_weighted" in metrics["cv_mean_metrics"]
     assert len(pd.read_csv(artifacts.time_series_cv_metrics_path)) == 3
 

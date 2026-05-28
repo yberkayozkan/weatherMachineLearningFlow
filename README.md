@@ -261,8 +261,8 @@ roc_auc_ovr.png (when ROC curves can be calculated)
 `feature_importance.csv` and `feature_importance.png` report the trained
 model's `feature_importances_` values. `time_series_cv_metrics.csv` and its
 plot report development validation stability across expanding-window folds;
-the acceptance tag is determined only by final holdout `f1_weighted`.
-Both trainers compute balanced sample weights from each training partition
+the acceptance tag is determined only by final holdout `f1_macro`.
+Both trainers compute square-root balanced sample weights from each training partition
 only, for every cross-validation fold and the final model fit. Active
 atmospheric model inputs include dew-point spread, wind U/V components,
 layered cloud cover, and previous-day maximum/minimum temperature lags;

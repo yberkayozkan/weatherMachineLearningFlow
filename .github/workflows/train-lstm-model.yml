@@ -1,46 +1,38 @@
-name: Train LightGBM Weather Model
+name: Train LSTM Historical Forecast Weather Model
 
 on:
   workflow_dispatch:
     inputs:
-      n_estimators:
-        description: "LightGBM tree count"
+      sequence_length:
+        description: "Hourly sequence length"
         required: false
-        default: "500"
+        default: "24"
+      hidden_size:
+        description: "LSTM hidden size"
+        required: false
+        default: "64"
+      num_layers:
+        description: "LSTM layer count"
+        required: false
+        default: "1"
+      epochs:
+        description: "Training epochs"
+        required: false
+        default: "12"
+      batch_size:
+        description: "Batch size"
+        required: false
+        default: "256"
       learning_rate:
-        description: "LightGBM learning rate"
+        description: "Learning rate"
         required: false
-        default: "0.05"
-      max_depth:
-        description: "LightGBM max tree depth"
-        required: false
-        default: "5"
-      num_leaves:
-        description: "LightGBM maximum leaves"
-        required: false
-        default: "31"
-      subsample:
-        description: "LightGBM row subsample ratio"
-        required: false
-        default: "0.9"
-      colsample_bytree:
-        description: "LightGBM column subsample ratio"
-        required: false
-        default: "0.9"
-      reg_lambda:
-        description: "LightGBM L2 regularization"
-        required: false
-        default: "1.0"
+        default: "0.001"
       test_fraction:
         description: "Latest-period final holdout fraction"
         required: false
         default: "0.2"
-      cv_splits:
-        description: "Expanding-window development validation split count"
-        required: false
-        default: "3"
       max_rows:
-        description: "Optional row limit; blank means full table"
+        description: "Optional latest eligible row limit; blank means full 2021+ range"
         required: false
         default: ""
       acceptance_threshold:
@@ -52,7 +44,7 @@ on:
     types: [completed]
 
 concurrency:
-  group: weather-lightgbm-training
+  group: weather-lstm-training
   cancel-in-progress: false
 
 jobs:
@@ -60,6 +52,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -67,17 +60,16 @@ jobs:
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
       MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
       MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
-      TRAIN_N_ESTIMATORS: ${{ github.event.inputs.n_estimators || '500' }}
-      TRAIN_LEARNING_RATE: ${{ github.event.inputs.learning_rate || '0.05' }}
-      TRAIN_MAX_DEPTH: ${{ github.event.inputs.max_depth || '5' }}
-      TRAIN_NUM_LEAVES: ${{ github.event.inputs.num_leaves || '31' }}
-      TRAIN_SUBSAMPLE: ${{ github.event.inputs.subsample || '0.9' }}
-      TRAIN_COLSAMPLE_BYTREE: ${{ github.event.inputs.colsample_bytree || '0.9' }}
-      TRAIN_REG_LAMBDA: ${{ github.event.inputs.reg_lambda || '1.0' }}
+      TRAIN_SEQUENCE_LENGTH: ${{ github.event.inputs.sequence_length || '24' }}
+      TRAIN_HIDDEN_SIZE: ${{ github.event.inputs.hidden_size || '64' }}
+      TRAIN_NUM_LAYERS: ${{ github.event.inputs.num_layers || '1' }}
+      TRAIN_EPOCHS: ${{ github.event.inputs.epochs || '12' }}
+      TRAIN_BATCH_SIZE: ${{ github.event.inputs.batch_size || '256' }}
+      TRAIN_LEARNING_RATE: ${{ github.event.inputs.learning_rate || '0.001' }}
       TRAIN_TEST_FRACTION: ${{ github.event.inputs.test_fraction || '0.2' }}
-      TRAIN_CV_SPLITS: ${{ github.event.inputs.cv_splits || '3' }}
       TRAIN_MAX_ROWS: ${{ github.event.inputs.max_rows || '' }}
       TRAIN_ACCEPTANCE_THRESHOLD: ${{ github.event.inputs.acceptance_threshold || '0.40' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,30 +86,28 @@ jobs:
       - name: Run tests
         run: pytest -q
 
-      - name: Train LightGBM model from Supabase
+      - name: Train LSTM model from Supabase
         shell: bash
         run: |
           args=(
             --table-name "$SUPABASE_FEATURE_TABLE"
-            --output-dir artifacts/lightgbm-training
-            --n-estimators "$TRAIN_N_ESTIMATORS"
+            --output-dir artifacts/lstm-training
+            --sequence-length "$TRAIN_SEQUENCE_LENGTH"
+            --hidden-size "$TRAIN_HIDDEN_SIZE"
+            --num-layers "$TRAIN_NUM_LAYERS"
+            --epochs "$TRAIN_EPOCHS"
+            --batch-size "$TRAIN_BATCH_SIZE"
             --learning-rate "$TRAIN_LEARNING_RATE"
-            --max-depth "$TRAIN_MAX_DEPTH"
-            --num-leaves "$TRAIN_NUM_LEAVES"
-            --subsample "$TRAIN_SUBSAMPLE"
-            --colsample-bytree "$TRAIN_COLSAMPLE_BYTREE"
-            --reg-lambda "$TRAIN_REG_LAMBDA"
             --test-fraction "$TRAIN_TEST_FRACTION"
-            --cv-splits "$TRAIN_CV_SPLITS"
             --acceptance-threshold "$TRAIN_ACCEPTANCE_THRESHOLD"
           )
           if [ -n "$TRAIN_MAX_ROWS" ]; then
             args+=(--max-rows "$TRAIN_MAX_ROWS")
           fi
-          python -m weather_ml.pipelines.train_lightgbm_from_supabase "${args[@]}"
+          python -m weather_ml.pipelines.train_lstm_from_supabase "${args[@]}"
 
-      - name: Upload LightGBM training artifacts
+      - name: Upload LSTM training artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: weather-lightgbm-training-artifacts
-          path: artifacts/lightgbm-training
+          name: weather-lstm-training-artifacts
+          path: artifacts/lstm-training

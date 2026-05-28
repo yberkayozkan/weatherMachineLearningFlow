@@ -62,6 +62,7 @@ HISTORY_METRIC_NAMES = [
     "accuracy",
     "precision_weighted",
     "recall_weighted",
+    "f1_macro",
     "f1_weighted",
     "roc_auc_ovr_weighted",
     "log_loss",
@@ -215,7 +216,7 @@ def train_weather_condition_model(
         len(test),
         params.n_estimators,
     )
-    model.fit(x_train, y_train, sample_weight=_build_balanced_sample_weight(y_train))
+    model.fit(x_train, y_train, sample_weight=_build_sqrt_balanced_sample_weight(y_train))
     logger.info("completed model training")
 
     predicted_labels = model.predict(x_test)
@@ -471,7 +472,7 @@ def _build_xgboost_time_series_cv_metrics(
         model.fit(
             fold_train[feature_columns],
             label_encoder.transform(fold_train[target_column].astype(str)),
-            sample_weight=_build_balanced_sample_weight(
+            sample_weight=_build_sqrt_balanced_sample_weight(
                 label_encoder.transform(fold_train[target_column].astype(str))
             ),
         )
@@ -496,8 +497,8 @@ def _build_xgboost_time_series_cv_metrics(
     return pd.DataFrame(rows)
 
 
-def _build_balanced_sample_weight(y_train: np.ndarray) -> np.ndarray:
-    return compute_sample_weight(class_weight="balanced", y=y_train)
+def _build_sqrt_balanced_sample_weight(y_train: np.ndarray) -> np.ndarray:
+    return np.sqrt(compute_sample_weight(class_weight="balanced", y=y_train))
 
 
 def _build_cv_fold_row(
@@ -549,12 +550,13 @@ def _build_metrics(
 ) -> dict[str, object]:
     classes = list(label_encoder.classes_)
     roc_auc = _safe_multiclass_roc_auc(y_test, probabilities, len(classes))
+    f1_macro = float(f1_score(y_test, predicted_labels, average="macro", zero_division=0))
     f1_weighted = float(f1_score(y_test, predicted_labels, average="weighted", zero_division=0))
     precision_weighted = float(
         precision_score(y_test, predicted_labels, average="weighted", zero_division=0)
     )
     loss = _safe_log_loss(y_test, probabilities, len(classes))
-    accepted = f1_weighted >= acceptance_threshold
+    accepted = f1_macro >= acceptance_threshold
     return {
         "rows_total": int(len(train) + len(test)),
         "rows_train": int(len(train)),
@@ -570,12 +572,12 @@ def _build_metrics(
         "recall_weighted": float(
             recall_score(y_test, predicted_labels, average="weighted", zero_division=0)
         ),
-        "f1_macro": float(f1_score(y_test, predicted_labels, average="macro", zero_division=0)),
+        "f1_macro": f1_macro,
         "f1_weighted": f1_weighted,
         "roc_auc_ovr_weighted": roc_auc,
         "log_loss": loss,
         "accepted": accepted,
-        "acceptance_metric": "f1_weighted",
+        "acceptance_metric": "f1_macro",
         "acceptance_threshold": acceptance_threshold,
         model_params_name: model_params,
         "classification_report": classification_report(
@@ -640,6 +642,9 @@ def _build_metrics_history(
                     ),
                     "f1_weighted": float(
                         f1_score(y_values, predicted_labels, average="weighted", zero_division=0)
+                    ),
+                    "f1_macro": float(
+                        f1_score(y_values, predicted_labels, average="macro", zero_division=0)
                     ),
                     "roc_auc_ovr_weighted": _safe_multiclass_roc_auc(
                         y_values, probabilities, len(classes)
@@ -731,7 +736,7 @@ def _write_metrics_history_plot(output_path: Path, history: pd.DataFrame) -> Non
         "accuracy",
         "precision_weighted",
         "recall_weighted",
-        "f1_weighted",
+        "f1_macro",
         "roc_auc_ovr_weighted",
         "log_loss",
     ]
@@ -756,7 +761,7 @@ def _write_metrics_history_plot(output_path: Path, history: pd.DataFrame) -> Non
 
 
 def _write_time_series_cv_plot(output_path: Path, cv_metrics: pd.DataFrame) -> None:
-    metric_names = ["accuracy", "balanced_accuracy", "f1_weighted", "roc_auc_ovr_weighted"]
+    metric_names = ["accuracy", "balanced_accuracy", "f1_macro", "roc_auc_ovr_weighted"]
     fig, ax = plt.subplots(figsize=(10, 6))
     for metric_name in metric_names:
         if cv_metrics[metric_name].notna().any():
@@ -861,7 +866,7 @@ def _log_mlflow_run(
                 "validation_strategy": "time_series_split",
                 "cv_splits": cv_splits,
                 "validation_gap_hours": VALIDATION_GAP_HOURS,
-                "class_weighting": "balanced_sample_weight",
+                "class_weighting": "sqrt_balanced_sample_weight",
                 "training_scope": training_scope,
                 "feature_columns": ",".join(feature_columns or DEFAULT_FEATURE_COLUMNS),
             }

@@ -30,6 +30,7 @@ def _metrics_history() -> pd.DataFrame:
                 "accuracy": 0.9,
                 "precision_weighted": 0.8,
                 "recall_weighted": 0.7,
+                "f1_macro": 0.65,
                 "f1_weighted": 0.75,
                 "roc_auc_ovr_weighted": 0.85,
                 "log_loss": 0.2,
@@ -81,6 +82,7 @@ def test_lightgbm_training_writes_diagnostic_artifacts(tmp_path) -> None:
     assert metrics["validation_strategy"] == "time_series_split"
     assert metrics["cv_splits"] == 3
     assert metrics["validation_gap_hours"] == 24
+    assert metrics["acceptance_metric"] == "f1_macro"
     assert len(pd.read_csv(artifacts.time_series_cv_metrics_path)) == 3
 
 
@@ -156,7 +158,7 @@ def test_lightgbm_mlflow_logs_params_metrics_history_and_artifacts(monkeypatch, 
     metrics = {
         "target_column": training.DEFAULT_TARGET,
         "accepted": True,
-        "acceptance_metric": "f1_weighted",
+        "acceptance_metric": "f1_macro",
         "acceptance_threshold": 0.4,
         "cv_mean_metrics": {name: 0.25 for name in training.SUMMARY_METRIC_NAMES},
         **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
@@ -187,14 +189,14 @@ def test_lightgbm_mlflow_logs_params_metrics_history_and_artifacts(monkeypatch, 
     assert calls["params"][0]["model_type"] == "LGBMClassifier"
     assert calls["params"][0]["cv_splits"] == 3
     assert calls["params"][0]["validation_gap_hours"] == 24
-    assert calls["params"][0]["class_weighting"] == "balanced_sample_weight"
+    assert calls["params"][0]["class_weighting"] == "sqrt_balanced_sample_weight"
     assert calls["summary"][0] == {
         **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
         **{f"cv_mean_{name}": 0.25 for name in training.SUMMARY_METRIC_NAMES},
     }
     assert calls["history"][0][0] == "lightgbm-run"
     assert any(
-        metric.key == "cv_validation_f1_weighted" and metric.step == 3
+        metric.key == "cv_validation_f1_macro" and metric.step == 3
         for metric in calls["history"][0][1]
     )
     assert calls["artifacts"] == [str(tmp_path)]

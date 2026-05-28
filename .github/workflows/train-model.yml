@@ -40,7 +40,7 @@ on:
         required: false
         default: ""
       acceptance_threshold:
-        description: "Minimum f1_weighted for accepted tag"
+        description: "Minimum f1_macro for accepted tag"
         required: false
         default: "0.40"
   workflow_run:
@@ -55,7 +55,7 @@ jobs:
   train:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

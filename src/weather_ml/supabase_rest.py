@@ -4,6 +4,7 @@ import math
 from typing import Any
 
 import pandas as pd
+from postgrest.exceptions import APIError
 from supabase import create_client
 
 
@@ -35,10 +36,30 @@ def upsert_dataframe_rest(
 
     for start in range(0, len(records), batch_size):
         batch = records[start : start + batch_size]
-        client.table(table_name).upsert(batch, on_conflict=on_conflict).execute()
+        try:
+            client.table(table_name).upsert(batch, on_conflict=on_conflict).execute()
+        except APIError as exc:
+            try:
+                _raise_schema_cache_hint(exc, table_name)
+            except RuntimeError as hint:
+                raise hint from exc
         written += len(batch)
 
     return written
+
+
+def _raise_schema_cache_hint(exc: APIError, table_name: str) -> None:
+    if getattr(exc, "code", None) != "PGRST205":
+        raise exc
+
+    raise RuntimeError(
+        "Supabase REST could not find table "
+        f"{table_name!r} in the exposed schema cache. Apply "
+        "sql/005_kadikoy_weather_code_tables.sql to the target Supabase project, "
+        "then rerun the pipeline. If the table already exists, reload the PostgREST "
+        "schema cache and verify SUPABASE_RAW_TABLE/SUPABASE_FEATURE_TABLE match the "
+        "exact case-sensitive table names."
+    )
 
 
 def read_table_rest(

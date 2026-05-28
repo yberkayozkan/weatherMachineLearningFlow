@@ -23,12 +23,12 @@ from weather_ml.training import (
     TrainingArtifacts,
     _add_time_series_validation_metrics,
     _assert_training_contract,
-    _build_balanced_sample_weight,
     _build_cv_fold_row,
     _build_feature_importance,
     _build_metrics,
     _build_mlflow_cv_metrics,
     _build_mlflow_history_metrics,
+    _build_sqrt_balanced_sample_weight,
     _build_temporal_validation_split,
     _log_mlflow_metric_batches,
     _prepare_training_frame,
@@ -100,7 +100,7 @@ def train_lightgbm_weather_condition_model(
         len(test),
         params.n_estimators,
     )
-    model.fit(x_train, y_train, sample_weight=_build_balanced_sample_weight(y_train))
+    model.fit(x_train, y_train, sample_weight=_build_sqrt_balanced_sample_weight(y_train))
     predicted_labels = model.predict(x_test).astype(int)
     predicted_conditions = label_encoder.inverse_transform(predicted_labels)
     probabilities = model.predict_proba(x_test)
@@ -256,7 +256,7 @@ def _build_lightgbm_time_series_cv_metrics(
         model.fit(
             fold_train[DEFAULT_FEATURE_COLUMNS],
             label_encoder.transform(fold_train[target_column].astype(str)),
-            sample_weight=_build_balanced_sample_weight(
+            sample_weight=_build_sqrt_balanced_sample_weight(
                 label_encoder.transform(fold_train[target_column].astype(str))
             ),
         )
@@ -321,6 +321,9 @@ def _build_lightgbm_metrics_history(
                     "f1_weighted": float(
                         f1_score(y_values, predicted_labels, average="weighted", zero_division=0)
                     ),
+                    "f1_macro": float(
+                        f1_score(y_values, predicted_labels, average="macro", zero_division=0)
+                    ),
                     "roc_auc_ovr_weighted": _safe_multiclass_roc_auc(
                         y_values, probabilities, len(classes)
                     ),
@@ -364,7 +367,7 @@ def _log_lightgbm_mlflow_run(
                 "validation_strategy": "time_series_split",
                 "cv_splits": cv_splits,
                 "validation_gap_hours": VALIDATION_GAP_HOURS,
-                "class_weighting": "balanced_sample_weight",
+                "class_weighting": "sqrt_balanced_sample_weight",
             }
         )
         mlflow.set_tags(
