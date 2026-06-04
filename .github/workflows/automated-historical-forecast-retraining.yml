@@ -1,0 +1,56 @@
+name: Automated Historical Forecast Retraining
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: automated-historical-forecast-retraining
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_FEATURE_TABLE: ${{ vars.SUPABASE_FEATURE_TABLE || 'KadikoyWeatherCodeFeature' }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+      MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Run automated retraining
+        run: >
+          python -m weather_ml.pipelines.automated_retraining_historical_forecast
+          --table-name "$SUPABASE_FEATURE_TABLE"
+          --output-dir artifacts/automated-historical-forecast-retraining
+          --current-window-days 30
+          --promotion-metric f1_macro
+          --min-improvement 0.02
+          --psi-warning-threshold 0.10
+          --psi-drift-threshold 0.20
+
+      - name: Upload automated retraining artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: automated-historical-forecast-retraining-artifacts
+          path: artifacts/automated-historical-forecast-retraining

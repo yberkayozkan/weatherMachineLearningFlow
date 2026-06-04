@@ -8,7 +8,6 @@ from weather_ml.config import get_settings
 from weather_ml.local_store import timestamp_slug, write_dataframe, write_json
 from weather_ml.openmeteo import fetch_archive_hourly, normalize_archive_hourly
 
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 

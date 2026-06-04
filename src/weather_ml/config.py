@@ -41,12 +41,17 @@ def require_supabase_rest_credentials() -> tuple[str, str]:
     settings = get_settings()
     key = settings.supabase_service_role_key or settings.supabase_key
     if not settings.supabase_url or not key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY are required for Supabase REST operations.")
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY are required "
+            "for Supabase REST operations."
+        )
     return settings.supabase_url, key
 
 
 def require_supabase_management_credentials() -> tuple[str, str]:
     settings = get_settings()
     if not settings.supabase_access_token:
-        raise RuntimeError("SUPABASE_ACCESS_TOKEN is required for Supabase Management API SQL operations.")
+        raise RuntimeError(
+            "SUPABASE_ACCESS_TOKEN is required for Supabase Management API SQL operations."
+        )
     return settings.supabase_project_ref, settings.supabase_access_token

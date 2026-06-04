@@ -13,14 +13,15 @@ from weather_ml.openmeteo_features import (
     validate_feature_upload_frame,
 )
 
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def run(
     input_csv: str = "exports/openmeteo_hourly_istanbul_2010_2026_supabase_import_clean.csv",
-    output_csv: str = "exports/openmeteo_hourly_features_istanbul_2010_2026_supabase_import_clean.csv",
+    output_csv: str = (
+        "exports/openmeteo_hourly_features_istanbul_2010_2026_supabase_import_clean.csv"
+    ),
     summary_json: str = "exports/openmeteo_hourly_features_summary.json",
     keep_incomplete_rows: bool = False,
     max_observed_at: str | None = None,
@@ -53,13 +54,24 @@ def run(
     }
     Path(summary_json).parent.mkdir(parents=True, exist_ok=True)
     Path(summary_json).write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    logger.info("built openmeteo features: rows=%s output=%s summary=%s", len(output), output_csv, summary_json)
+    logger.info(
+        "built openmeteo features: rows=%s output=%s summary=%s",
+        len(output),
+        output_csv,
+        summary_json,
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-csv", default="exports/openmeteo_hourly_istanbul_2010_2026_supabase_import_clean.csv")
-    parser.add_argument("--output-csv", default="exports/openmeteo_hourly_features_istanbul_2010_2026_supabase_import_clean.csv")
+    parser.add_argument(
+        "--input-csv",
+        default="exports/openmeteo_hourly_istanbul_2010_2026_supabase_import_clean.csv",
+    )
+    parser.add_argument(
+        "--output-csv",
+        default="exports/openmeteo_hourly_features_istanbul_2010_2026_supabase_import_clean.csv",
+    )
     parser.add_argument("--summary-json", default="exports/openmeteo_hourly_features_summary.json")
     parser.add_argument("--keep-incomplete-rows", action="store_true")
     parser.add_argument("--max-observed-at")

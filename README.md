@@ -54,7 +54,7 @@ thunderstorm
 - XGBoost, LightGBM, and scikit-learn for multiclass model training and evaluation.
 - Matplotlib for evaluation and feature-importance visual artifacts.
 - MLflow configured for DagsHub-compatible tracking of parameters, metrics,
-  tags, metric history, and artifacts.
+  tags, metric history, artifacts, and registered pyfunc model versions.
 - GitHub Actions for ingestion and training workflows.
 - pytest and Ruff for verification and code-quality checks.
 
@@ -243,7 +243,8 @@ XGBoost writes to `artifacts/training` by default with model file
 profile writes to `artifacts/xgboost-historical-forecast-training` with model
 file `weather_condition_xgboost_historical_forecast_model.pkl`. Each training
 run also writes the following shared outputs; when MLflow logging is enabled,
-the output directory is uploaded to the run.
+the output directory is uploaded to the run and the trained model is logged as
+an MLflow pyfunc model version.
 
 ```text
 metrics.json
@@ -275,6 +276,30 @@ Historical Forecast profile adds `cape`, `freezing_level_height`, and
 MLflow metrics are logged explicitly by the training code; MLflow autologging
 is not enabled.
 
+The MLflow Model Registry names are:
+
+```text
+weather-condition-xgboost
+weather-condition-lightgbm
+weather-condition-xgboost-historical-forecast
+```
+
+Registered pyfunc models return `predicted_weather_condition` and
+`prediction_confidence` from a dataframe containing the recorded
+`feature_columns`. Use the registry version or alias promoted in MLflow for
+production serving instead of reading local `.pkl` files directly.
+
+The automated Historical Forecast retraining command computes PSI drift against
+the current `production` registry alias, trains a candidate model, and promotes
+the candidate when its `f1_macro` beats production by at least `0.02`:
+
+```powershell
+python -m weather_ml.pipelines.automated_retraining_historical_forecast --table-name KadikoyWeatherCodeFeature
+```
+
+It writes `drift_report.json`, `promotion_decision.json`, and training outputs
+under `artifacts/automated-historical-forecast-retraining`.
+
 ## GitHub Actions
 
 `.github/workflows/weather-ingestion.yml` runs on a daily schedule and can be
@@ -298,6 +323,12 @@ separate XGBoost profile only from eligible rows on or after
 `2021-03-23 00:00:00`, uses `cape`, `freezing_level_height`, and `uv_index`,
 logs to its own MLflow experiment, and uploads
 `artifacts/xgboost-historical-forecast-training`.
+
+`.github/workflows/automated-historical-forecast-retraining.yml` runs weekly on
+Sunday at `02:00 UTC` and can be started manually. It computes PSI drift for the
+latest 30 days, retrains Historical Forecast XGBoost, compares the candidate to
+the MLflow `production` alias, and auto-promotes only when the candidate clears
+the configured improvement threshold.
 
 Add these GitHub secrets:
 

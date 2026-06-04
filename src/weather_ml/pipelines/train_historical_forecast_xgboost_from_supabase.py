@@ -90,6 +90,7 @@ def main() -> None:
     parser.add_argument("--subsample", type=float, default=0.9)
     parser.add_argument("--colsample-bytree", type=float, default=0.9)
     parser.add_argument("--reg-lambda", type=float, default=1.0)
+    parser.add_argument("--class-weight-power", type=float, default=1.0)
     parser.add_argument("--acceptance-threshold", type=float, default=0.40)
     args = parser.parse_args()
     run(
@@ -106,6 +107,7 @@ def main() -> None:
             subsample=args.subsample,
             colsample_bytree=args.colsample_bytree,
             reg_lambda=args.reg_lambda,
+            class_weight_power=args.class_weight_power,
             acceptance_threshold=args.acceptance_threshold,
         ),
     )

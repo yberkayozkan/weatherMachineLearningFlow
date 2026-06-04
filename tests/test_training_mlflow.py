@@ -99,6 +99,13 @@ def test_sqrt_balanced_sample_weight_softens_minority_class_weight() -> None:
     np.testing.assert_allclose(weights, np.sqrt(balanced_weights))
 
 
+def test_balanced_sample_weight_power_can_restore_full_class_weight() -> None:
+    y_train = np.array([0, 0, 0, 1])
+    weights = training._build_balanced_sample_weight(y_train, power=1.0)
+
+    np.testing.assert_allclose(weights, np.array([2 / 3, 2 / 3, 2 / 3, 2]))
+
+
 def test_log_mlflow_metric_batches_splits_1200_metrics(monkeypatch) -> None:
     captured_batches: list[list[object]] = []
 
@@ -195,7 +202,7 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
     }
     assert calls["params"][0]["cv_splits"] == 3
     assert calls["params"][0]["validation_gap_hours"] == 24
-    assert calls["params"][0]["class_weighting"] == "sqrt_balanced_sample_weight"
+    assert calls["params"][0]["class_weighting"] == "balanced_sample_weight_power_0.5"
     assert len(calls["history"]) == 1
     assert calls["history"][0][0] == "run-123"
     assert any(
@@ -204,6 +211,71 @@ def test_log_mlflow_run_uploads_summary_as_batch_and_artifacts_once(monkeypatch,
     )
     assert calls["single_artifacts"] == []
     assert calls["artifact_dirs"] == [str(tmp_path)]
+
+
+def test_log_mlflow_run_registers_pyfunc_model_when_model_path_is_available(
+    monkeypatch, tmp_path
+) -> None:
+    calls: dict[str, list[object]] = {"registry": [], "history": []}
+
+    class RunContext:
+        def __enter__(self):
+            return SimpleNamespace(info=SimpleNamespace(run_id="run-123"))
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr(training.mlflow, "set_experiment", lambda value: None)
+    monkeypatch.setattr(training.mlflow, "start_run", lambda **kwargs: RunContext())
+    monkeypatch.setattr(training.mlflow, "log_params", lambda values: None)
+    monkeypatch.setattr(training.mlflow, "set_tags", lambda values: None)
+    monkeypatch.setattr(training.mlflow, "log_metrics", lambda values: None)
+    monkeypatch.setattr(training.mlflow, "log_artifacts", lambda path: None)
+    monkeypatch.setattr(
+        training,
+        "_log_mlflow_metric_batches",
+        lambda run_id, metrics: calls["history"].append((run_id, metrics)),
+    )
+    monkeypatch.setattr(
+        training,
+        "_log_registered_pyfunc_model",
+        lambda **kwargs: calls["registry"].append(kwargs),
+    )
+
+    model_path = tmp_path / "weather_condition_xgboost_model.pkl"
+    metrics = {
+        "target_column": training.DEFAULT_TARGET,
+        "accepted": True,
+        "acceptance_metric": "f1_macro",
+        "acceptance_threshold": 0.4,
+        "cv_mean_metrics": {name: 0.25 for name in training.SUMMARY_METRIC_NAMES},
+        **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
+    }
+    model = SimpleNamespace(
+        n_estimators=500,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.9,
+        colsample_bytree=0.9,
+    )
+
+    training._log_mlflow_run(
+        experiment_name="weather-test",
+        model=model,
+        metrics=metrics,
+        output_dir=tmp_path,
+        label_encoder=SimpleNamespace(classes_=["clear", "rain"]),
+        training_params=training.XGBoostTrainingParams(),
+        metrics_history=_metrics_history(2),
+        cv_metrics=_cv_metrics(),
+        cv_splits=3,
+        model_path=model_path,
+        registered_model_name="weather-prod",
+    )
+
+    assert calls["registry"] == [
+        {"model_path": model_path, "registered_model_name": "weather-prod"}
+    ]
 
 
 def test_training_excludes_legacy_summary_plot_and_preserves_diagnostic_artifacts(tmp_path) -> None:
@@ -226,6 +298,8 @@ def test_training_excludes_legacy_summary_plot_and_preserves_diagnostic_artifact
     assert artifacts.metrics_history_plot_path.exists()
     assert artifacts.time_series_cv_metrics_path.exists()
     assert artifacts.time_series_cv_plot_path.exists()
+    assert artifacts.feature_distribution_baseline_path is not None
+    assert artifacts.feature_distribution_baseline_path.exists()
     assert artifacts.roc_curve_path is not None
     assert artifacts.roc_curve_path.exists()
 
@@ -238,6 +312,11 @@ def test_training_excludes_legacy_summary_plot_and_preserves_diagnostic_artifact
     assert metrics["cv_splits"] == 3
     assert metrics["validation_gap_hours"] == 24
     assert metrics["acceptance_metric"] == "f1_macro"
+    assert metrics["actual_class_distribution"]
+    assert metrics["predicted_class_distribution"]
+    assert metrics["feature_distribution_baseline_json"] == str(
+        artifacts.feature_distribution_baseline_path
+    )
     assert metrics["accepted"] == (
         metrics["f1_macro"] >= training.XGBoostTrainingParams(n_estimators=2).acceptance_threshold
     )
@@ -309,3 +388,13 @@ def test_historical_forecast_workflow_invokes_dedicated_training_command() -> No
     assert "train_historical_forecast_xgboost_from_supabase" in workflow
     assert "artifacts/xgboost-historical-forecast-training" in workflow
     assert "OpenMeteo Supabase Pipeline" in workflow
+
+
+def test_automated_retraining_workflow_runs_weekly_command() -> None:
+    workflow = Path(
+        ".github/workflows/automated-historical-forecast-retraining.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'cron: "0 2 * * 0"' in workflow
+    assert "automated_retraining_historical_forecast" in workflow
+    assert "artifacts/automated-historical-forecast-retraining" in workflow

@@ -9,8 +9,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mlflow
+import mlflow.pyfunc
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -33,6 +37,7 @@ from sklearn.preprocessing import LabelEncoder, label_binarize
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier
 
+from weather_ml.drift import write_feature_distribution_baseline
 from weather_ml.openmeteo_features import (
     FORBIDDEN_FUTURE_TARGET_COLUMNS,
     WEATHER_CONDITION_LABELS,
@@ -47,6 +52,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_TARGET = "target_weather_condition_24h"
 VALIDATION_GAP_HOURS = 24
 MLFLOW_METRIC_BATCH_SIZE = 500
+XGBOOST_REGISTERED_MODEL_NAME = "weather-condition-xgboost"
+HISTORICAL_FORECAST_XGBOOST_REGISTERED_MODEL_NAME = (
+    "weather-condition-xgboost-historical-forecast"
+)
 SUMMARY_METRIC_NAMES = [
     "accuracy",
     "balanced_accuracy",
@@ -142,6 +151,7 @@ class TrainingArtifacts:
     time_series_cv_metrics_path: Path
     time_series_cv_plot_path: Path
     roc_curve_path: Path | None
+    feature_distribution_baseline_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -159,7 +169,28 @@ class XGBoostTrainingParams:
     subsample: float = 0.9
     colsample_bytree: float = 0.9
     reg_lambda: float = 1.0
+    class_weight_power: float = 0.5
     acceptance_threshold: float = 0.40
+
+
+class WeatherConditionPyfuncModel(mlflow.pyfunc.PythonModel):
+    def load_context(self, context) -> None:  # noqa: ANN001
+        with open(context.artifacts["model_payload"], "rb") as file:
+            self.payload = pickle.load(file)
+
+    def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:  # noqa: ANN001
+        feature_columns = self.payload["feature_columns"]
+        label_encoder = self.payload["label_encoder"]
+        model = self.payload["model"]
+        probabilities = model.predict_proba(model_input[feature_columns])
+        predicted_labels = probabilities.argmax(axis=1)
+        predicted_conditions = label_encoder.inverse_transform(predicted_labels)
+        return pd.DataFrame(
+            {
+                "predicted_weather_condition": predicted_conditions,
+                "prediction_confidence": probabilities.max(axis=1),
+            }
+        )
 
 
 def train_weather_condition_model(
@@ -176,6 +207,7 @@ def train_weather_condition_model(
     model_filename: str = "weather_condition_xgboost_model.pkl",
     mlflow_run_name: str = "xgboost-weather-condition",
     training_scope: str = "full_history",
+    registered_model_name: str | None = XGBOOST_REGISTERED_MODEL_NAME,
 ) -> TrainingArtifacts:
     selected_features = list(feature_columns or DEFAULT_FEATURE_COLUMNS)
     _assert_training_contract(target_column, selected_features)
@@ -216,7 +248,13 @@ def train_weather_condition_model(
         len(test),
         params.n_estimators,
     )
-    model.fit(x_train, y_train, sample_weight=_build_sqrt_balanced_sample_weight(y_train))
+    model.fit(
+        x_train,
+        y_train,
+        sample_weight=_build_balanced_sample_weight(
+            y_train, power=params.class_weight_power
+        ),
+    )
     logger.info("completed model training")
 
     predicted_labels = model.predict(x_test)
@@ -241,6 +279,7 @@ def train_weather_condition_model(
             "subsample": params.subsample,
             "colsample_bytree": params.colsample_bytree,
             "reg_lambda": params.reg_lambda,
+            "class_weight_power": params.class_weight_power,
             "eval_metric": "mlogloss",
         },
         feature_columns=selected_features,
@@ -260,6 +299,7 @@ def train_weather_condition_model(
     time_series_cv_metrics_path = out / "time_series_cv_metrics.csv"
     time_series_cv_plot_path = out / "time_series_cv_metrics.png"
     roc_curve_path = out / "roc_auc_ovr.png"
+    feature_distribution_baseline_path = out / "feature_distribution_baseline.json"
     legacy_metrics_plot_path = out / "metrics_summary.png"
     legacy_metrics_plot_path.unlink(missing_ok=True)
 
@@ -287,10 +327,16 @@ def train_weather_condition_model(
     metrics["metrics_history_csv"] = str(metrics_history_path)
     metrics["feature_importance_csv"] = str(feature_importance_path)
     metrics["time_series_cv_metrics_csv"] = str(time_series_cv_metrics_path)
+    metrics["feature_distribution_baseline_json"] = str(feature_distribution_baseline_path)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     feature_importance.to_csv(feature_importance_path, index=False)
     metrics_history.to_csv(metrics_history_path, index=False)
     cv_metrics.to_csv(time_series_cv_metrics_path, index=False)
+    write_feature_distribution_baseline(
+        feature_distribution_baseline_path,
+        train,
+        selected_features,
+    )
     pd.DataFrame(
         {
             "observed_at": test["observed_at"].dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -326,6 +372,8 @@ def train_weather_condition_model(
             mlflow_run_name=mlflow_run_name,
             feature_columns=selected_features,
             training_scope=training_scope,
+            model_path=model_path,
+            registered_model_name=registered_model_name,
         )
 
     return TrainingArtifacts(
@@ -340,6 +388,7 @@ def train_weather_condition_model(
         time_series_cv_metrics_path=time_series_cv_metrics_path,
         time_series_cv_plot_path=time_series_cv_plot_path,
         roc_curve_path=roc_curve_path if roc_curve_written else None,
+        feature_distribution_baseline_path=feature_distribution_baseline_path,
     )
 
 
@@ -374,6 +423,7 @@ def train_historical_forecast_xgboost_model(
         model_filename="weather_condition_xgboost_historical_forecast_model.pkl",
         mlflow_run_name="xgboost-historical-forecast-weather-condition",
         training_scope="historical_forecast_2021_03_23_plus",
+        registered_model_name=HISTORICAL_FORECAST_XGBOOST_REGISTERED_MODEL_NAME,
     )
 
 
@@ -472,8 +522,9 @@ def _build_xgboost_time_series_cv_metrics(
         model.fit(
             fold_train[feature_columns],
             label_encoder.transform(fold_train[target_column].astype(str)),
-            sample_weight=_build_sqrt_balanced_sample_weight(
-                label_encoder.transform(fold_train[target_column].astype(str))
+            sample_weight=_build_balanced_sample_weight(
+                label_encoder.transform(fold_train[target_column].astype(str)),
+                power=training_params.class_weight_power,
             ),
         )
         y_validation = label_encoder.transform(validation[target_column].astype(str))
@@ -498,7 +549,14 @@ def _build_xgboost_time_series_cv_metrics(
 
 
 def _build_sqrt_balanced_sample_weight(y_train: np.ndarray) -> np.ndarray:
-    return np.sqrt(compute_sample_weight(class_weight="balanced", y=y_train))
+    return _build_balanced_sample_weight(y_train, power=0.5)
+
+
+def _build_balanced_sample_weight(y_train: np.ndarray, *, power: float) -> np.ndarray:
+    if power < 0:
+        raise ValueError("class_weight_power must be greater than or equal to 0.")
+    weights = compute_sample_weight(class_weight="balanced", y=y_train)
+    return np.power(weights, power)
 
 
 def _build_cv_fold_row(
@@ -557,6 +615,16 @@ def _build_metrics(
     )
     loss = _safe_log_loss(y_test, probabilities, len(classes))
     accepted = f1_macro >= acceptance_threshold
+    actual_counts = {
+        classes[class_index]: int(count)
+        for class_index, count in zip(*np.unique(y_test, return_counts=True), strict=True)
+    }
+    predicted_counts = {
+        classes[class_index]: int(count)
+        for class_index, count in zip(
+            *np.unique(predicted_labels, return_counts=True), strict=True
+        )
+    }
     return {
         "rows_total": int(len(train) + len(test)),
         "rows_train": int(len(train)),
@@ -579,6 +647,10 @@ def _build_metrics(
         "accepted": accepted,
         "acceptance_metric": "f1_macro",
         "acceptance_threshold": acceptance_threshold,
+        "actual_class_distribution": {name: actual_counts.get(name, 0) for name in classes},
+        "predicted_class_distribution": {
+            name: predicted_counts.get(name, 0) for name in classes
+        },
         model_params_name: model_params,
         "classification_report": classification_report(
             y_test,
@@ -844,6 +916,8 @@ def _log_mlflow_run(
     mlflow_run_name: str = "xgboost-weather-condition",
     feature_columns: list[str] | None = None,
     training_scope: str = "full_history",
+    model_path: Path | None = None,
+    registered_model_name: str | None = XGBOOST_REGISTERED_MODEL_NAME,
 ) -> None:
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     if tracking_uri:
@@ -866,7 +940,9 @@ def _log_mlflow_run(
                 "validation_strategy": "time_series_split",
                 "cv_splits": cv_splits,
                 "validation_gap_hours": VALIDATION_GAP_HOURS,
-                "class_weighting": "sqrt_balanced_sample_weight",
+                "class_weighting": (
+                    f"balanced_sample_weight_power_{training_params.class_weight_power:g}"
+                ),
                 "training_scope": training_scope,
                 "feature_columns": ",".join(feature_columns or DEFAULT_FEATURE_COLUMNS),
             }
@@ -896,7 +972,30 @@ def _log_mlflow_run(
         ]
         _log_mlflow_metric_batches(run.info.run_id, history_metrics)
         mlflow.log_artifacts(str(output_dir))
+        if model_path is not None and registered_model_name:
+            _log_registered_pyfunc_model(
+                model_path=model_path,
+                registered_model_name=registered_model_name,
+            )
     logger.info("completed MLflow upload: history_metrics=%s", len(history_metrics))
+
+
+def _log_registered_pyfunc_model(*, model_path: Path, registered_model_name: str) -> None:
+    mlflow.pyfunc.log_model(
+        artifact_path="model",
+        python_model=WeatherConditionPyfuncModel(),
+        artifacts={"model_payload": str(model_path)},
+        registered_model_name=registered_model_name,
+        pip_requirements=[
+            "mlflow>=2.14.0",
+            "numpy>=2.0.0",
+            "pandas>=2.2.0",
+            "scikit-learn>=1.5.0",
+            "xgboost>=2.1.0",
+            "lightgbm>=4.6.0",
+        ],
+    )
+    logger.info("registered MLflow model: name=%s", registered_model_name)
 
 
 def _build_mlflow_history_metrics(metrics_history: pd.DataFrame) -> list[Metric]:

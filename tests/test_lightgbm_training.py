@@ -202,6 +202,73 @@ def test_lightgbm_mlflow_logs_params_metrics_history_and_artifacts(monkeypatch, 
     assert calls["artifacts"] == [str(tmp_path)]
 
 
+def test_lightgbm_mlflow_registers_pyfunc_model_when_model_path_is_available(
+    monkeypatch, tmp_path
+) -> None:
+    calls: dict[str, list[object]] = {"registry": [], "history": []}
+
+    class RunContext:
+        def __enter__(self):
+            return SimpleNamespace(info=SimpleNamespace(run_id="lightgbm-run"))
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr(lightgbm_training.mlflow, "set_experiment", lambda value: None)
+    monkeypatch.setattr(lightgbm_training.mlflow, "start_run", lambda **kwargs: RunContext())
+    monkeypatch.setattr(lightgbm_training.mlflow, "log_params", lambda value: None)
+    monkeypatch.setattr(lightgbm_training.mlflow, "set_tags", lambda value: None)
+    monkeypatch.setattr(lightgbm_training.mlflow, "log_metrics", lambda value: None)
+    monkeypatch.setattr(lightgbm_training.mlflow, "log_artifacts", lambda value: None)
+    monkeypatch.setattr(
+        lightgbm_training,
+        "_log_mlflow_metric_batches",
+        lambda run_id, metrics: calls["history"].append((run_id, metrics)),
+    )
+    monkeypatch.setattr(
+        lightgbm_training,
+        "_log_registered_pyfunc_model",
+        lambda **kwargs: calls["registry"].append(kwargs),
+    )
+
+    model_path = tmp_path / "weather_condition_lightgbm_model.pkl"
+    metrics = {
+        "target_column": training.DEFAULT_TARGET,
+        "accepted": True,
+        "acceptance_metric": "f1_macro",
+        "acceptance_threshold": 0.4,
+        "cv_mean_metrics": {name: 0.25 for name in training.SUMMARY_METRIC_NAMES},
+        **{name: 0.5 for name in training.SUMMARY_METRIC_NAMES},
+    }
+    model = SimpleNamespace(
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=5,
+        num_leaves=31,
+        subsample=0.9,
+        subsample_freq=1,
+        colsample_bytree=0.9,
+    )
+
+    lightgbm_training._log_lightgbm_mlflow_run(
+        experiment_name="weather-condition-lightgbm",
+        model=model,
+        metrics=metrics,
+        output_dir=tmp_path,
+        label_encoder=SimpleNamespace(classes_=["clear", "rain"]),
+        training_params=lightgbm_training.LightGBMTrainingParams(),
+        metrics_history=_metrics_history(),
+        cv_metrics=_cv_metrics(),
+        cv_splits=3,
+        model_path=model_path,
+        registered_model_name="weather-lightgbm-prod",
+    )
+
+    assert calls["registry"] == [
+        {"model_path": model_path, "registered_model_name": "weather-lightgbm-prod"}
+    ]
+
+
 def test_lightgbm_removes_stale_roc_when_final_holdout_has_one_class(tmp_path) -> None:
     stale_roc = tmp_path / "roc_auc_ovr.png"
     stale_roc.write_bytes(b"stale")

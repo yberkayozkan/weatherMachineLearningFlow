@@ -31,6 +31,7 @@ from weather_ml.training import (
     _build_sqrt_balanced_sample_weight,
     _build_temporal_validation_split,
     _log_mlflow_metric_batches,
+    _log_registered_pyfunc_model,
     _prepare_training_frame,
     _safe_log_loss,
     _safe_multiclass_roc_auc,
@@ -42,6 +43,7 @@ from weather_ml.training import (
 )
 
 logger = logging.getLogger(__name__)
+LIGHTGBM_REGISTERED_MODEL_NAME = "weather-condition-lightgbm"
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,8 @@ def train_lightgbm_weather_condition_model(
             metrics_history=metrics_history,
             cv_metrics=cv_metrics,
             cv_splits=cv_splits,
+            model_path=model_path,
+            registered_model_name=LIGHTGBM_REGISTERED_MODEL_NAME,
         )
 
     return TrainingArtifacts(
@@ -344,6 +348,8 @@ def _log_lightgbm_mlflow_run(
     metrics_history: pd.DataFrame,
     cv_metrics: pd.DataFrame,
     cv_splits: int,
+    model_path: Path | None = None,
+    registered_model_name: str | None = LIGHTGBM_REGISTERED_MODEL_NAME,
 ) -> None:
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     if tracking_uri:
@@ -394,4 +400,9 @@ def _log_lightgbm_mlflow_run(
         ]
         _log_mlflow_metric_batches(run.info.run_id, history_metrics)
         mlflow.log_artifacts(str(output_dir))
+        if model_path is not None and registered_model_name:
+            _log_registered_pyfunc_model(
+                model_path=model_path,
+                registered_model_name=registered_model_name,
+            )
     logger.info("completed LightGBM MLflow upload: history_metrics=%s", len(history_metrics))
